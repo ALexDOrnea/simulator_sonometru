@@ -10,7 +10,7 @@ def simulator_sonometru_absolut(cale_fisier, mod_timp="Fast", c_calib=10.0):
     1.0.
     """
     # Pasul 1: Citirea semnalului stereo (Capitolul 2.1)
-    rate, data = wavfile.read("wavv.wav")
+    rate, data = wavfile.read("complex_stereo_melody.wav")
 
     # Convertim datele brute la amplitudine normată digital (între -1.0 și 1.0)
     if data.dtype == np.int16:
