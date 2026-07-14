@@ -1,101 +1,75 @@
+import warnings
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.io import wavfile
 
+#ignore wav warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="scipy.io.wavfile")
 
-def simulator_sonometru_absolut(cale_fisier, mod_timp="Fast", c_calib=10.0):
-    """Simulează un sonometru conform formulelor din capitolul 1 și 2.
+### VARIABILE GLOBALE
+WAV_PATH="wav_samples/wavv.wav"
+MODE=input("Insert mode (Fast,Slow,Peak)")
+# deschidem wav
+SAMPLE_RATE,AUDIO_DATA=wavfile.read(WAV_PATH)
+######
 
-    c_calib: Presiunea maximă în Pascali (Pa) corespunzătoare valorii digitale
-    1.0.
-    """
-    # Pasul 1: Citirea semnalului stereo (Capitolul 2.1)
-    rate, data = wavfile.read("complex_stereo_melody.wav")
+#print(SAMPLE_RATE)
+#print(AUDIO_DATA)
 
-    # Convertim datele brute la amplitudine normată digital (între -1.0 și 1.0)
-    if data.dtype == np.int16:
-        data = data / 32768.0
-    elif data.dtype == np.int32:
-        data = data / 2147483648.0
+#stereo to mono(split left only)
+if len(AUDIO_DATA.shape)>1:
+    AUDIO_DATA=AUDIO_DATA[:,0]
+    print("Audio transformat mono")
+else: 
+    print("Audio e deja mono")
 
-    # Pasul 2: Transformarea semnalului din valori digitale în Pascali [Pa]
-    # p(t) = semnal_digital(t) * constanta_calibrare
-    presiune_pa = data * c_calib
+#normalizare
+if AUDIO_DATA.dtype==np.int16:
+    AUDIO_NORM=AUDIO_DATA/32768.0
+    print("Audio 16b normalizat")
+elif AUDIO_DATA.dtype==np.int32:
+    AUDIO_NORM=AUDIO_DATA/2147483648.0
+    print("Audio 32b normalizat")
+else:
+    AUDIO_NORM=AUDIO_DATA
+    print("Audio deja normalizat")
+NUMBER_OF_SAMPLES=len(AUDIO_NORM)
 
-    # Pasul 3: Definirea referinței absolute din curs (Formula 1.22)
-    P_REF = 2e-5  # 20 microPascali
+#configurare mod
+if MODE=="Fast" or MODE=="fast":
+    WINDOW_SIZE=int(0.125*SAMPLE_RATE)
+elif MODE=="Slow" or MODE=="slow":
+    WINDOW_SIZE=int(1.0*SAMPLE_RATE)
+elif MODE=="Peak" or MODE=="peak":
+    WINDOW_SIZE=(0.035*SAMPLE_RATE)
+# print(WINDOW_SIZE)
 
-    # Pasul 4: Integrarea temporală pe ferestre (Formula 1.8 și Paragraful 2.1)
-    # Fast = 125ms, Slow = 1000ms
-    durata_fereastra = 0.125 if mod_timp == "Fast" else 1.0
-    dimensiune_fereastra = int(rate * durata_fereastra)
-    total_esantioane = len(presiune_pa)
-    timp_axe = []
-    spl_stanga = []
-    spl_dreapta = []
-
-    # Parcurgem semnalul din aproape în aproape (Integrare pe intervalul T)
-    for i in range(0, total_esantioane, dimensiune_fereastra):
-        fereastra = presiune_pa[i : i + dimensiune_fereastra]
-
-        if len(fereastra) < dimensiune_fereastra:
-            break
-
-        # Separăm canalele (Stânga / Dreapta)
-        p_stanga = fereastra[:, 0]
-        p_dreapta = fereastra[:, 1]
-
-        # Calculăm presiunea sonoră efectivă RMS pentru fiecare canal (Formula 1.8)
-        p_rms_stanga = np.sqrt(np.mean(p_stanga**2))
-        p_rms_dreapta = np.sqrt(np.mean(p_dreapta**2))
-
-        # Pasul 5: Blocul de logaritmare în dB SPL absolute (Formula 1.23)
-        # np.clip previne logaritmul din 0 în caz de liniște totală
-        db_spl_L = 20 * np.log10(np.clip(p_rms_stanga / P_REF, 1e-5, None))
-        db_spl_R = 20 * np.log10(np.clip(p_rms_dreapta / P_REF, 1e-5, None))
-
-        # Salvare timp (mijlocul ferestrei curente)
-        moment_timp = (i + dimensiune_fereastra / 2) / rate
-        timp_axe.append(moment_timp)
-        spl_stanga.append(db_spl_L)
-        spl_dreapta.append(db_spl_R)
-
-    return np.array(timp_axe), np.array(spl_stanga), np.array(spl_dreapta)
+#Adaugam curbele A B C D
 
 
-# --- RULARE SIMULARE ȘI GRAFIC ---
-if __name__ == "__main__":
-    nume_fisier = "test.wav"  # Fișierul tău stereo
 
-    try:
-        # Rulăm sonometrul virtual pe modul Fast
-        # c_calib=20.0 înseamnă că un semnal digital maxim (1.0) va fi egal cu 20 Pa în aer.
-        timp, spl_L, spl_R = simulator_sonometru_absolut(
-            nume_fisier, mod_timp="Fast", c_calib=20.0
-        )
+#integrare
+NUMBER_OF_WINDOWS=len(AUDIO_NORM)//WINDOW_SIZE
+DATE_TRUNCHIATE=AUDIO_NORM[:NUMBER_OF_WINDOWS*WINDOW_SIZE]
 
-        # Generare Grafic în dB SPL absolut
-        plt.figure(figsize=(12, 5))
-        plt.plot(timp, spl_L, label="Canal Stâng (L)", color="royalblue")
-        plt.plot(timp, spl_R, label="Canal Drept (R)", color="darkorange")
+#transformam vectorul de date in matrice cu o fereastra pe fiecare rand
+WINDOWS_MATRIX=DATE_TRUNCHIATE.reshape(NUMBER_OF_WINDOWS,WINDOW_SIZE)
+#calcul valori rms direct pe vectori
+RMS_VECTOR=np.sqrt(np.mean(np.square(WINDOWS_MATRIX),axis=1)) #axis decide directia de integrare(pe linii)
 
-        plt.title("Nivelul Presiunii Sonore Absolute [dB SPL] - Conform Cap. 1 & 2")
-        plt.xlabel("Timp (secunde)")
-        plt.ylabel("Nivel Sonor (dB SPL)")
+#epsilon foarte mic
+EPSILON=1e-12
+VECTOR_DB=20*np.log10(RMS_VECTOR*EPSILON)
 
-        # Setăm axa Y conform dinamicii auzului descrisă în curs (0 dB auz - 120 dB concert rock)
-        plt.ylim(0, 130)
-        plt.axhline(
-            y=120,
-            color="r",
-            linestyle="--",
-            alpha=0.7,
-            label="Prag disconfort (120 dB)",
-        )
+#clip valori minime de liniste
+VECTOR_DB=np.clip(VECTOR_DB,-120.0, 0.0)
 
-        plt.grid(True, linestyle=":", alpha=0.6)
-        plt.legend(loc="lower right")
-        plt.show()
+print(len(VECTOR_DB))
+TIME=np.arange(0,NUMBER_OF_SAMPLES)/SAMPLE_RATE
+print(len(TIME))
 
-    except FileNotFoundError:
-        print(f"Eroare: Nu s-a găsit fișierul '{nume_fisier}'.")
+# if MODE!="Peak" or MODE!="peak":
+#     TIME=np.arange(0,NUMBER_OF_SAMPLES)/SAMPLE_RATE
+#     plt.figure(figsize=(10,4))   
+#     plt.plot(TIME,VECTOR_DB)   
+    
