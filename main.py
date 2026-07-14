@@ -7,7 +7,7 @@ from scipy.io import wavfile
 warnings.filterwarnings("ignore", category=UserWarning, module="scipy.io.wavfile")
 
 ### VARIABILE GLOBALE
-WAV_PATH="wav_samples/p.wav"
+WAV_PATH="WAVMICROFON_+_LOG_SMAART/audioaudacity.wav"
 MODE=input("Insert mode (Fast,Slow,Peak)")
 # deschidem wav
 SAMPLE_RATE,AUDIO_DATA=wavfile.read(WAV_PATH)
