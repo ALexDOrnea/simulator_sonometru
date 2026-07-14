@@ -41,7 +41,10 @@ if MODE=="Fast" or MODE=="fast":
 elif MODE=="Slow" or MODE=="slow":
     WINDOW_SIZE=int(1.0*SAMPLE_RATE)
 elif MODE=="Peak" or MODE=="peak":
-    WINDOW_SIZE=(0.035*SAMPLE_RATE)
+    WINDOW_SIZE=int(0.035*SAMPLE_RATE)
+else: 
+    print("Mod inexistent")
+    exit
 # print(WINDOW_SIZE)
 
 #Adaugam curbele A B C D
@@ -59,17 +62,26 @@ RMS_VECTOR=np.sqrt(np.mean(np.square(WINDOWS_MATRIX),axis=1)) #axis decide direc
 
 #epsilon foarte mic
 EPSILON=1e-12
-VECTOR_DB=20*np.log10(RMS_VECTOR*EPSILON)
+VECTOR_DB=20*np.log10(RMS_VECTOR+EPSILON)
 
 #clip valori minime de liniste
 VECTOR_DB=np.clip(VECTOR_DB,-120.0, 0.0)
 
-print(len(VECTOR_DB))
-TIME=np.arange(0,NUMBER_OF_SAMPLES)/SAMPLE_RATE
-print(len(TIME))
+# print(len(VECTOR_DB))
+WINDOW_DURATION = WINDOW_SIZE / SAMPLE_RATE
+TIME = np.arange(0, NUMBER_OF_WINDOWS) * WINDOW_DURATION
+# print(len(TIME))
 
-# if MODE!="Peak" or MODE!="peak":
-#     TIME=np.arange(0,NUMBER_OF_SAMPLES)/SAMPLE_RATE
-#     plt.figure(figsize=(10,4))   
-#     plt.plot(TIME,VECTOR_DB)   
+if MODE!="Peak" or MODE!="peak":
+    plt.figure(figsize=(10,4))   
+    plt.plot(TIME,VECTOR_DB,color="purple",label=f"Grafic pentru modul {MODE}")
+    plt.title(f"Analiza semnal acustic sonometru in modul {MODE}")  
+    plt.xlabel("Timp(s)")
+    plt.ylabel("Nivel(dB FS)")  #decibelli relativi full scale deoarece calculatorul nu stie cat de puternice sunt boxele pentru db spl (sound pressure level)
+    plt.grid(True)
+    plt.legend()
+    plt.show()
+else:
+    print("Valoarea Peak a semnalului")
+    print(np.max(VECTOR_DB))
     
