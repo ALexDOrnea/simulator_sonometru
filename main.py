@@ -72,7 +72,7 @@ WINDOW_DURATION = WINDOW_SIZE / SAMPLE_RATE
 TIME = np.arange(0, NUMBER_OF_WINDOWS) * WINDOW_DURATION
 # print(len(TIME))
 
-if MODE!="Peak" or MODE!="peak":
+if MODE=="Fast" or MODE=="fast" or MODE=="Slow" or MODE=="slow":
     plt.figure(figsize=(10,4))   
     plt.plot(TIME,VECTOR_DB,color="purple",label=f"Grafic pentru modul {MODE}")
     plt.title(f"Analiza semnal acustic sonometru in modul {MODE}")  
@@ -81,7 +81,8 @@ if MODE!="Peak" or MODE!="peak":
     plt.grid(True)
     plt.legend()
     plt.show()
-else:
+elif MODE=="Peak" or MODE=="peak":
     print("Valoarea Peak a semnalului")
     print(np.max(VECTOR_DB))
-    
+else:
+    print("Mod inexistent")
