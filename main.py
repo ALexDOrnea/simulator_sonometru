@@ -7,7 +7,7 @@ from scipy.io import wavfile
 warnings.filterwarnings("ignore", category=UserWarning, module="scipy.io.wavfile")
 
 ### VARIABILE GLOBALE
-WAV_PATH="wav_samples/wavv.wav"
+WAV_PATH="wav_samples/p.wav"
 MODE=input("Insert mode (Fast,Slow,Peak)")
 # deschidem wav
 SAMPLE_RATE,AUDIO_DATA=wavfile.read(WAV_PATH)
@@ -44,7 +44,7 @@ elif MODE=="Peak" or MODE=="peak":
     WINDOW_SIZE=int(0.035*SAMPLE_RATE)
 else: 
     print("Mod inexistent")
-    exit
+    exit()
 # print(WINDOW_SIZE)
 
 #Adaugam curbele A B C D
