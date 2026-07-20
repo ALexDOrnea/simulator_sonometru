@@ -1,6 +1,7 @@
 # simulator_sonometru
 
 
+Acest branch contine fisiere vechi, de test 
 
 # Fisiere:
  * a_curve_test.py -- prototip implementare filtru
