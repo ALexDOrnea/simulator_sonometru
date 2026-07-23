@@ -4,3 +4,4 @@
  sounddevice
  pyqtgraph
  pyqt5
+ pyinstaller
