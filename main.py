@@ -5,7 +5,7 @@ import queue
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.io import wavfile
-from scipy.signal import lfilter, lfilter_zi, butter
+from scipy.signal import lfilter,lfilter_zi,butter,sosfilt,sosfilt_zi,bilinear_zpk,zpk2sos
 
 ## pentru ignorare avertismente wav
 warnings.filterwarnings("ignore",category=UserWarning,module="scipy.io.wavfile")
@@ -109,6 +109,8 @@ MODE=input("Mode(Fast, Slow, Peak)\n>  ").strip()
 print("\n~~~~~SELECTIE FILTRU~~~~~")
 print("1 Low-pass")
 print("2 High-pass")
+print("3 A-Weighting (IEC 61672)")
+print("4 C-Weighting (IEC 61672)")
 FILTRU_OPT=input("> ").strip().lower()
 
 if FILTRU_OPT in ("1","lowpass","low-pass","low","lp"):
@@ -117,24 +119,29 @@ if FILTRU_OPT in ("1","lowpass","low-pass","low","lp"):
 elif FILTRU_OPT in ("2","highpass","high-pass","high","hp"):
     TIP_FILTRU="highpass"
     BTYPE_SCIPY="highpass"
+elif FILTRU_OPT in ("3", "a", "a-weighting", "a-weight"):
+    TIP_FILTRU = "A-Weighting"
+elif FILTRU_OPT in ("4", "c", "c-weighting", "c-weight"):
+    TIP_FILTRU = "C-Weighting"
 else:
     print("Invalid option.using highpass")
     TIP_FILTRU="highpass"
     BTYPE_SCIPY="highpass"
 
-print("\n~~~~~SELECTIE FRECV TAIERE~~~~~")
-try:
-    CUTOFF_HZ=float(input("Cutoff freq\n> ").strip())
-except ValueError:
-    print("invalid freq")
-    sys.exit()
+if TIP_FILTRU=="highpass" or TIP_FILTRU=="lowpass":
+    print("\n~~~~~SELECTIE FRECV TAIERE~~~~~")
+    try:
+        CUTOFF_HZ=float(input("Cutoff freq\n> ").strip())
+    except ValueError:
+        print("invalid freq")
+        sys.exit()
 
-print("\n~~~~~SELECTIE ORDIN FILTRU~~~~~")
-try:
-    ORDIN_FILTRU=float(input("filter order\n> ").strip())
-except ValueError:
-    print("invalid value,using 4")
-    ORDIN_FILTRU = 4
+    print("\n~~~~~SELECTIE ORDIN FILTRU~~~~~")
+    try:
+        ORDIN_FILTRU=float(input("filter order\n> ").strip())
+    except ValueError:
+        print("invalid value,using 4")
+        ORDIN_FILTRU = 4
 
 print("\n~~~~~SELECTIE GRAFICE~~~~~")
 print("1 dB FS")
@@ -223,6 +230,37 @@ fft_frequencies=np.fft.rfftfreq(WINDOW_SIZE,d=1.0/SAMPLE_RATE)
 #############PROCESARE AUDIO SI ANALIZA#################
 
 ##functii 
+def get_a_weighting_filter(fs):
+    """Generează coeficienții SOS ai filtrului A conform IEC 61672-1 (Anexa E)"""
+    f1,f2,f3,f4=20.598997,107.65265,737.86223,12194.217
+    A1000=-2.000
+    p1=-2*np.pi*f1
+    p2=-2*np.pi*f2
+    p3=-2*np.pi*f3
+    p4=-2*np.pi*f4
+
+    z=[0,0,0,0]  #4 zerouri la 0 Hz
+    p=[p1,p1,p2,p3,p4,p4] # 6 poli
+    k=(2*np.pi*f4)**2*(10**(A1000/20))
+
+    zeros_d,poles_d,gain_d=bilinear_zpk(z,p,k,fs)
+    return zpk2sos(zeros_d,poles_d,gain_d)
+
+def get_c_weighting_filter(fs):
+    """Generează coeficienții SOS ai filtrului C conform IEC 61672-1 (Anexa E)"""
+    f1,f4=20.598997,12194.217
+    C1000=-0.062
+
+    p1=-2*np.pi*f1
+    p4=-2*np.pi*f4
+
+    z = [0, 0] # 2 zerouri la 0 Hz
+    p = [p1, p1, p4, p4] # 4 poli
+    k = (2 * np.pi * f4)**2 * (10**(C1000 / 20))
+
+    zeros_d, poles_d, gain_d = bilinear_zpk(z, p, k, fs)
+    return zpk2sos(zeros_d, poles_d, gain_d)
+
 def actualizeaza_ring_buffer(buffer,chunk):
     """introduce ultimul bloc in ring buffer inclusiv cand blocul e mai mare"""
     frames=len(chunk)
