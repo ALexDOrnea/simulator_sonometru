@@ -2,3 +2,5 @@
  numpy
  scipy
  sounddevice
+ pyqtgraph
+ pyqt5
