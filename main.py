@@ -231,8 +231,21 @@ def filtreaza_block(chunk):
 ##### BANC DE FILTRE PE BENZI DE OCTAVA (IEC 61260-1) ###
 ########################################################
 # Seria de baza 10 (preferata de IEC 61260-1): raport de octava G = 10^(3/10)
-# Frecventa centrala:  f_c = f_ref * G^(x/b)
-# Limite de banda:     f_low = f_c * G^(-1/2b) ,  f_high = f_c * G^(1/2b)
+#
+# --- MODIFICAT ---
+# Frecventa centrala exacta (exact mid-band frequency), conform IEC 61260-1 §5.4:
+#   - cand numitorul lui 1/b este IMPAR (b=1, b=3 -> octave, terte), §5.4.1:
+#         f_c = f_ref * G^(x/b)                       [Formula (2)]
+#     In acest caz, unul dintre filtre poate avea centrala exact la 1000 Hz.
+#   - cand numitorul lui 1/b este PAR (b=6, b=12 -> sesimi, doisprezecimi), §5.4.2:
+#         f_c = f_ref * G^((2x+1)/(2b))                [Formula (3)]
+#     In acest caz NICIUN filtru nu are centrala la 1000 Hz; in schimb marginea
+#     dintre doua filtre adiacente cade exact la 1000 Hz (vezi NOTE 2, §5.4.2).
+# Codul anterior folosea mereu Formula (2), indiferent de b -> gresit pentru b=6/12.
+# --- SFARSIT MODIFICARE (comentariu) ---
+#
+# Limite de banda (independente de paritatea lui b, §5.6):
+#     f_low = f_c * G^(-1/2b) ,  f_high = f_c * G^(1/2b)
 # unde b = numarul de benzi pe octava (1, 3, 6 sau 12), f_ref = 1000 Hz
 
 OCTAVE_G = 10 ** (3.0 / 10.0)
@@ -242,6 +255,19 @@ def formateaza_frecventa(f):
     if f >= 1000:
         return f"{f/1000:.3g}k"
     return f"{f:.3g}"
+
+# --- ADAUGAT ---
+def frecventa_centrala_exacta(x, b):
+    """Calculeaza frecventa centrala exacta conform IEC 61260-1 §5.4.
+
+    - Formula (2), §5.4.1, pentru numitor impar al lui 1/b (b=1, b=3)
+    - Formula (3), §5.4.2, pentru numitor par al lui 1/b (b=6, b=12)
+    """
+    if b % 2 == 1:
+        return FREQ_REF * OCTAVE_G ** (x / b)
+    else:
+        return FREQ_REF * OCTAVE_G ** ((2 * x + 1) / (2 * b))
+# --- SFARSIT ADAUGARE ---
 
 def design_octave_bands(fs, b, fmin=20.0, fmax=20000.0):
     """Proiecteaza un banc de filtre trece-banda Butterworth (sos) pe benzi de 1/b octava,
@@ -255,7 +281,11 @@ def design_octave_bands(fs, b, fmin=20.0, fmax=20000.0):
 
     benzi = []
     for x in range(x_min, x_max + 1):
-        fc = FREQ_REF * OCTAVE_G ** (x / b)
+        # --- MODIFICAT ---
+        # Inainte:  fc = FREQ_REF * OCTAVE_G ** (x / b)   (mereu Formula (2), gresit pt. b par)
+        # Acum: se alege formula corecta in functie de paritatea lui b (§5.4.1 / §5.4.2)
+        fc = frecventa_centrala_exacta(x, b)
+        # --- SFARSIT MODIFICARE ---
         if fc < fmin * 0.95 or fc > fmax * 1.05:
             continue
         f_low = fc * OCTAVE_G ** (-1.0 / (2 * b))
@@ -801,5 +831,4 @@ finally:
             pen=pg.mkPen(COL_CYAN, width=1.5),
             name=f"Spectru {TIP_PONDERARE}",
         )
-
         app2.exec_()
