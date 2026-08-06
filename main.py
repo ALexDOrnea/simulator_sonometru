@@ -153,6 +153,23 @@ else:
         print("Invalid option.using all")
         GRAFIC_OPT = "4"
 
+# ~~~~~CALIBRARE SPL (IEC 61672-1, 5.2 - Adjustments at the calibration check frequency)~~~~~
+# Constanta de calibrare converteste nivelul relativ (dBFS) in nivel absolut (dB SPL).
+# Se determina practic aplicand un calibrator acustic (ex: 94 dB SPL la 1 kHz) la microfon,
+# citind valoarea dBFS afisata de program, si calculand: CALIBRARE_DB = SPL_cunoscut - dBFS_citit.
+# Pentru moment, valoarea este introdusa manual de la tastatura.
+print("\n~~~~~CALIBRARE SPL~~~~~")
+print("Introdu constanta de calibrare (offset in dB) pentru a converti dBFS in dB SPL.")
+print("Aceasta se determina cu un calibrator acustic (ex: 94 dB SPL la 1 kHz) si")
+print("reprezinta diferenta: SPL_cunoscut - dBFS_masurat.")
+try:
+    CALIBRARE_DB = float(input("Constanta de calibrare (dB) > ").strip().replace(",", "."))
+except ValueError:
+    print("Valoare invalida. se foloseste 0.0 dB (fara calibrare, ramane dBFS)")
+    CALIBRARE_DB = 0.0
+
+print(f"Constanta de calibrare folosita: {CALIBRARE_DB:+.2f} dB")
+
 ###########################################
 #########Setari initiale DSP###############
 SAMPLE_RATE = 44100
@@ -314,11 +331,12 @@ print(
 def proceseaza_benzi(chunk_ponderat):
     """Filtreaza semnalul ponderat prin fiecare banda de octava (procesare in paralel/independenta
     pe fiecare banda) si calculeaza nivelul RMS ponderat in timp (Fast=0.125s, Slow=1s, Peak=0.035s),
-    conform principiului de mediere exponentiala din IEC 61672-1."""
+    conform principiului de mediere exponentiala din IEC 61672-1. Se aplica si constanta de
+    calibrare CALIBRARE_DB pentru a obtine nivelul in dB SPL."""
     global band_ms_state
     n = len(chunk_ponderat)
     if n == 0:
-        return np.full(NUM_BENZI, -120.0)
+        return np.full(NUM_BENZI, -120.0 + CALIBRARE_DB)
 
     dt = n / SAMPLE_RATE
     if PEAK_MODE:
@@ -334,8 +352,8 @@ def proceseaza_benzi(chunk_ponderat):
         filtrat, banda["zi"] = sosfilt(banda["sos"], chunk_ponderat, zi=banda["zi"])
         ms_bloc = np.mean(np.square(filtrat))
         band_ms_state[i] = (1.0 - alpha) * band_ms_state[i] + alpha * ms_bloc
-        niveluri[i] = 10.0 * np.log10(band_ms_state[i] + EPSILON)
-    return np.clip(niveluri, -120.0, 0.0)
+        niveluri[i] = 10.0 * np.log10(band_ms_state[i] + EPSILON) + CALIBRARE_DB
+    return np.clip(niveluri, -120.0 + CALIBRARE_DB, 20.0 + CALIBRARE_DB)
 
 ########################################################
 ######### FERESTRE DE TIMP PENTRU METERUL GENERAL ######
@@ -374,18 +392,24 @@ def actualizeaza_ring_buffer(buffer, chunk):
         buffer[-frames:] = chunk
 
 def calculeaza_db_fft(buffer):
+    """Calculeaza nivelul RMS si spectrul FFT in dB, cu constanta de calibrare CALIBRARE_DB
+    aplicata pentru a converti dBFS in dB SPL."""
     rms = np.sqrt(np.mean(np.square(buffer)))
-    db = np.clip(20 * np.log10(rms + EPSILON), -120.0, 0.0)
+    db = 20 * np.log10(rms + EPSILON) + CALIBRARE_DB
+    db = np.clip(db, -120.0 + CALIBRARE_DB, 20.0 + CALIBRARE_DB)
 
     windowed_signal = buffer * hanning_window
     fft_raw = np.abs(np.fft.rfft(windowed_signal))
     fft_norm = fft_raw / (WINDOW_SIZE / 2.0)
-    fft_db = np.clip(20 * np.log10(fft_norm + EPSILON), -120.0, 0.0)
+    fft_db = 20 * np.log10(fft_norm + EPSILON) + CALIBRARE_DB
+    fft_db = np.clip(fft_db, -120.0 + CALIBRARE_DB, 20.0 + CALIBRARE_DB)
     return db, fft_db
 
 def calculeaza_peak_db(buffer):
+    """Calculeaza nivelul de varf (peak) in dB, cu constanta de calibrare CALIBRARE_DB aplicata."""
     peak = np.max(np.abs(buffer))
-    return float(np.clip(20 * np.log10(peak + EPSILON), -120.0, 0.0))
+    val = 20 * np.log10(peak + EPSILON) + CALIBRARE_DB
+    return float(np.clip(val, -120.0 + CALIBRARE_DB, 20.0 + CALIBRARE_DB))
 
 def proceseaza_ambele_semnale(chunk_raw, chunk_ponderat):
     actualizeaza_ring_buffer(live_ring_buffer_raw, chunk_raw)
@@ -397,8 +421,8 @@ def proceseaza_ambele_semnale(chunk_raw, chunk_ponderat):
     return db_raw, db_filtered, fft_raw, fft_filtered
 
 peak_hold_state = {
-    "raw_db": -120.0,
-    "filt_db": -120.0,
+    "raw_db": -120.0 + CALIBRARE_DB,
+    "filt_db": -120.0 + CALIBRARE_DB,
 }
 
 def get_peak_hold_display(cheie, valoare_curenta):
@@ -408,8 +432,8 @@ def get_peak_hold_display(cheie, valoare_curenta):
     return peak_hold_state[val_key]
 
 def reseteaza_peak_hold():
-    peak_hold_state["raw_db"] = -120.0
-    peak_hold_state["filt_db"] = -120.0
+    peak_hold_state["raw_db"] = -120.0 + CALIBRARE_DB
+    peak_hold_state["filt_db"] = -120.0 + CALIBRARE_DB
 
 def trimite_date_live(chunk, chunk_ponderat):
     current_time = play_pointer / SAMPLE_RATE
@@ -472,7 +496,7 @@ pg.setConfigOptions(antialias=False, useOpenGL=True, background="k", foreground=
 
 app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
 
-titlu_context_str = f" [{TIP_PONDERARE} | 1/{FRACTIE_OCTAVA} oct]"
+titlu_context_str = f" [{TIP_PONDERARE} | 1/{FRACTIE_OCTAVA} oct | cal {CALIBRARE_DB:+.1f} dB]"
 
 plot_db = None
 plot_fft = None
@@ -488,9 +512,11 @@ COL_GRAY = (120, 120, 120)
 COL_GREEN = (46, 204, 113)
 
 def culoare_pentru_nivel(db):
-    if db > -6.0:
+    prag_rosu = -6.0 + CALIBRARE_DB
+    prag_galben = -18.0 + CALIBRARE_DB
+    if db > prag_rosu:
         return "#e74c3c"
-    elif db > -18.0:
+    elif db > prag_galben:
         return "#f1c40f"
     else:
         return "#2ecc71"
@@ -513,11 +539,11 @@ def creeaza_coloana_meter(nume):
         "QProgressBar::chunk { background-color: #2ecc71; }"
     )
 
-    eticheta_valoare = QtWidgets.QLabel("-120.0 dB")
+    eticheta_valoare = QtWidgets.QLabel(f"{-120.0 + CALIBRARE_DB:.1f} dB")
     eticheta_valoare.setStyleSheet("color: white; font-size: 12px;")
     eticheta_valoare.setAlignment(QtCore.Qt.AlignCenter)
 
-    eticheta_peak = QtWidgets.QLabel("Peak: -120.0 dB")
+    eticheta_peak = QtWidgets.QLabel(f"Peak: {-120.0 + CALIBRARE_DB:.1f} dB")
     eticheta_peak.setStyleSheet("color: #f1c40f; font-size: 11px;")
     eticheta_peak.setAlignment(QtCore.Qt.AlignCenter)
 
@@ -603,8 +629,8 @@ else:
     if afiseaza_db:
         plot_db = win_graphics.addPlot(title=f"Nivel live: Z (nefiltrat) vs {TIP_PONDERARE}")
         plot_db.setLabel("bottom", "Timp (s)")
-        plot_db.setLabel("left", "Nivel (dB FS)")
-        plot_db.setYRange(-120, 0)
+        plot_db.setLabel("left", "Nivel (dB SPL)")
+        plot_db.setYRange(-120 + CALIBRARE_DB, 20 + CALIBRARE_DB)
         plot_db.showGrid(x=True, y=True, alpha=0.3)
         plot_db.addLegend()
         curve_db_raw = plot_db.plot(pen=pg.mkPen(COL_ORANGE, width=2), name=f"Z (nefiltrat) - nivel rolling ({MODE})")
@@ -622,9 +648,9 @@ else:
     if afiseaza_fft:
         plot_fft = win_graphics.addPlot(title=f"FFT in timp real: Z (nefiltrat) vs {TIP_PONDERARE}")
         plot_fft.setLabel("bottom", "Frecventa (Hz)")
-        plot_fft.setLabel("left", "Amplitudine (dB FS)")
+        plot_fft.setLabel("left", "Amplitudine (dB SPL)")
         plot_fft.setLogMode(x=True, y=False)
-        plot_fft.setYRange(-120, 0)
+        plot_fft.setYRange(-120 + CALIBRARE_DB, 20 + CALIBRARE_DB)
         plot_fft.showGrid(x=True, y=True, alpha=0.3)
         plot_fft.addLegend()
 
@@ -643,13 +669,14 @@ else:
             title=f"Analiza pe benzi de 1/{FRACTIE_OCTAVA} octava ({TIP_PONDERARE}) - IEC 61260-1"
         )
         plot_bands.setLabel("bottom", "Frecventa centrala banda (Hz)")
-        plot_bands.setLabel("left", "Nivel (dB)")
-        plot_bands.setYRange(-120, 0)
+        plot_bands.setLabel("left", "Nivel (dB SPL)")
+        plot_bands.setYRange(-120 + CALIBRARE_DB, 20 + CALIBRARE_DB)
         plot_bands.showGrid(x=False, y=True, alpha=0.3)
 
         x_positions = np.arange(NUM_BENZI)
         bar_item = pg.BarGraphItem(
-            x=x_positions, height=np.zeros(NUM_BENZI), width=0.8, brush=COL_GREEN, y0=-120.0
+            x=x_positions, height=np.zeros(NUM_BENZI), width=0.8, brush=COL_GREEN,
+            y0=-120.0 + CALIBRARE_DB
         )
         plot_bands.addItem(bar_item)
 
@@ -676,7 +703,9 @@ def on_close(event=None):
 win.closeEvent = lambda event: (on_close(), event.accept())
 
 def actualizeaza_bara(bara, eticheta_valoare, eticheta_peak, valoare_db, valoare_peak_db):
-    bara.setValue(int(np.clip((valoare_db + 120.0) * 10, 0, 1200)))
+    interval_bara = (20.0 + CALIBRARE_DB) - (-120.0 + CALIBRARE_DB)  # tot 140 dB, doar deplasat
+    poz = int(np.clip((valoare_db - (-120.0 + CALIBRARE_DB)) / interval_bara * 1200, 0, 1200))
+    bara.setValue(poz)
     bara.setStyleSheet(
         "QProgressBar { background-color: #222; border: 1px solid #555; }"
         f"QProgressBar::chunk {{ background-color: {culoare_pentru_nivel(valoare_db)}; }}"
@@ -728,11 +757,11 @@ def update_gui():
     if PEAK_MODE:
         print(
             f"Timp: {last_time:6.2f}s | "
-            f"Z (nefiltrat): {last_db_raw:6.1f} dBFS (peak {peak_raw:6.1f}) | "
-            f"{TIP_PONDERARE}: {last_db_filtered:6.1f} dBFS (peak {peak_filt:6.1f})"
+            f"Z (nefiltrat): {last_db_raw:6.1f} dB SPL (peak {peak_raw:6.1f}) | "
+            f"{TIP_PONDERARE}: {last_db_filtered:6.1f} dB SPL (peak {peak_filt:6.1f})"
         )
     else:
-        print(f"Timp: {x_data[-1]:6.2f}s | Z (nefiltrat): {y_db_raw[-1]:6.1f} dBFS | {TIP_PONDERARE}: {y_db_filtered[-1]:6.1f} dBFS")
+        print(f"Timp: {x_data[-1]:6.2f}s | Z (nefiltrat): {y_db_raw[-1]:6.1f} dB SPL | {TIP_PONDERARE}: {y_db_filtered[-1]:6.1f} dB SPL")
 
         if plot_db is not None:
             if SURSA_OPT == "2" and x_data[-1] > 10:
@@ -745,7 +774,7 @@ def update_gui():
             curve_fft_filtered.setData(fft_frequencies_disp, last_fft_filtered)
 
         if plot_bands is not None and last_niveluri_benzi is not None:
-            bar_item.setOpts(height=last_niveluri_benzi + 120.0)
+            bar_item.setOpts(height=last_niveluri_benzi - (-120.0 + CALIBRARE_DB))
 
     if stream is not None and not stream.active:
         running["active"] = False
@@ -793,15 +822,21 @@ finally:
         fft_orig = np.abs(np.fft.rfft(semnal_complet_raw * final_window)) / (N / 2.0)
         fft_filt = np.abs(np.fft.rfft(semnal_complet_filt * final_window)) / (N / 2.0)
 
-        db_orig = np.clip(20 * np.log10(fft_orig + EPSILON), -120, 0)
-        db_filt = np.clip(20 * np.log10(fft_filt + EPSILON), -120, 0)
+        db_orig = np.clip(
+            20 * np.log10(fft_orig + EPSILON) + CALIBRARE_DB,
+            -120 + CALIBRARE_DB, 20 + CALIBRARE_DB
+        )
+        db_filt = np.clip(
+            20 * np.log10(fft_filt + EPSILON) + CALIBRARE_DB,
+            -120 + CALIBRARE_DB, 20 + CALIBRARE_DB
+        )
 
         FINAL_DISPLAY_STEP = max(1, len(freqs_finale) // 4000)
         freqs_disp = freqs_finale[::FINAL_DISPLAY_STEP]
         db_orig_disp = db_orig[::FINAL_DISPLAY_STEP]
         db_filt_disp = db_filt[::FINAL_DISPLAY_STEP]
 
-        titlu_final = f"comparatie spectrala: Z (nefiltrat) vs {TIP_PONDERARE}"
+        titlu_final = f"comparatie spectrala: Z (nefiltrat) vs {TIP_PONDERARE} (cal {CALIBRARE_DB:+.1f} dB)"
 
         app2 = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
 
@@ -811,9 +846,9 @@ finally:
 
         plot_comp = win2.addPlot(title=titlu_final)
         plot_comp.setLabel("bottom", "Frecventa (Hz)")
-        plot_comp.setLabel("left", "Amplitudine (dB FS)")
+        plot_comp.setLabel("left", "Amplitudine (dB SPL)")
         plot_comp.setLogMode(x=True, y=False)
-        plot_comp.setYRange(-120, 0)
+        plot_comp.setYRange(-120 + CALIBRARE_DB, 20 + CALIBRARE_DB)
         plot_comp.showGrid(x=True, y=True, alpha=0.3)
         plot_comp.addLegend()
 
