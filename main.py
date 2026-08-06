@@ -307,6 +307,132 @@ def proceseaza_benzi(chunk_ponderat):
         niveluri[i] = 10.0 * np.log10(band_ms_state[i] + EPSILON)
     return np.clip(niveluri, -120.0, 0.0)
 
+########################################################
+######### FERESTRE DE TIMP PENTRU METERUL GENERAL ######
+########################################################
+
+if MODE.lower() == "fast":
+    WINDOW_SIZE = int(0.125 * SAMPLE_RATE)
+elif MODE.lower() == "slow":
+    WINDOW_SIZE = int(1.0 * SAMPLE_RATE)
+elif MODE.lower() == "peak":
+    WINDOW_SIZE = int(0.035 * SAMPLE_RATE)
+else:
+    print("not a mode. using fast")
+    WINDOW_SIZE = int(0.125 * SAMPLE_RATE)
+
+live_ring_buffer_raw = np.zeros(WINDOW_SIZE)
+live_ring_buffer_filtered = np.zeros(WINDOW_SIZE)
+hanning_window = np.hanning(WINDOW_SIZE)
+fft_frequencies = np.fft.rfftfreq(WINDOW_SIZE, d=1.0 / SAMPLE_RATE)
+
+FFT_DISPLAY_STEP = max(1, len(fft_frequencies) // 2000)
+fft_frequencies_disp = fft_frequencies[::FFT_DISPLAY_STEP]
+
+semnal_nefiltrat_complet = []
+semnal_filtrat_complet = []
+
+########################################################
+#############PROCESARE AUDIO SI ANALIZA#################
+
+def actualizeaza_ring_buffer(buffer, chunk):
+    frames = len(chunk)
+    if frames >= WINDOW_SIZE:
+        buffer[:] = chunk[-WINDOW_SIZE:]
+    else:
+        buffer[:] = np.roll(buffer, -frames)
+        buffer[-frames:] = chunk
+
+def calculeaza_db_fft(buffer):
+    rms = np.sqrt(np.mean(np.square(buffer)))
+    db = np.clip(20 * np.log10(rms + EPSILON), -120.0, 0.0)
+
+    windowed_signal = buffer * hanning_window
+    fft_raw = np.abs(np.fft.rfft(windowed_signal))
+    fft_norm = fft_raw / (WINDOW_SIZE / 2.0)
+    fft_db = np.clip(20 * np.log10(fft_norm + EPSILON), -120.0, 0.0)
+    return db, fft_db
+
+def calculeaza_peak_db(buffer):
+    peak = np.max(np.abs(buffer))
+    return float(np.clip(20 * np.log10(peak + EPSILON), -120.0, 0.0))
+
+def proceseaza_ambele_semnale(chunk_raw, chunk_ponderat):
+    actualizeaza_ring_buffer(live_ring_buffer_raw, chunk_raw)
+    actualizeaza_ring_buffer(live_ring_buffer_filtered, chunk_ponderat)
+
+    db_raw, fft_raw = calculeaza_db_fft(live_ring_buffer_raw)
+    db_filtered, fft_filtered = calculeaza_db_fft(live_ring_buffer_filtered)
+
+    return db_raw, db_filtered, fft_raw, fft_filtered
+
+peak_hold_state = {
+    "raw_db": -120.0,
+    "filt_db": -120.0,
+}
+
+def get_peak_hold_display(cheie, valoare_curenta):
+    val_key = f"{cheie}_db"
+    if valoare_curenta > peak_hold_state[val_key]:
+        peak_hold_state[val_key] = valoare_curenta
+    return peak_hold_state[val_key]
+
+def reseteaza_peak_hold():
+    peak_hold_state["raw_db"] = -120.0
+    peak_hold_state["filt_db"] = -120.0
+
+def trimite_date_live(chunk, chunk_ponderat):
+    current_time = play_pointer / SAMPLE_RATE
+
+    if PEAK_MODE:
+        actualizeaza_ring_buffer(live_ring_buffer_raw, chunk)
+        actualizeaza_ring_buffer(live_ring_buffer_filtered, chunk_ponderat)
+        db_raw = calculeaza_peak_db(live_ring_buffer_raw)
+        db_filtered = calculeaza_peak_db(live_ring_buffer_filtered)
+        data_queue.put((current_time, db_raw, db_filtered, None, None, None))
+    else:
+        db_raw, db_filtered, fft_raw, fft_filtered = proceseaza_ambele_semnale(
+            chunk, chunk_ponderat
+        )
+        niveluri_benzi = proceseaza_benzi(chunk_ponderat) if plot_bands is not None else None
+        data_queue.put((
+            current_time,
+            db_raw,
+            db_filtered,
+            fft_raw[::FFT_DISPLAY_STEP],
+            fft_filtered[::FFT_DISPLAY_STEP],
+            niveluri_benzi,
+        ))
+
+def playback_callback(outdata, frames, time_info, status):
+    global play_pointer
+    if status:
+        print(status, file=sys.stderr)
+    chunk = AUDIO_NORM[play_pointer:play_pointer + frames]
+    valid_frames = len(chunk)
+    if valid_frames == 0:
+        outdata.fill(0)
+        raise sd.CallbackStop()
+    chunk_ponderat = filtreaza_block(chunk)
+    outdata.fill(0)
+    outdata[:valid_frames, 0] = chunk_ponderat
+    play_pointer += valid_frames
+    semnal_nefiltrat_complet.append(chunk.copy())
+    semnal_filtrat_complet.append(chunk_ponderat.copy())
+    trimite_date_live(chunk, chunk_ponderat)
+    if valid_frames < frames:
+        raise sd.CallbackStop()
+
+def record_callback(indata, frames, time_info, status):
+    global play_pointer
+    if status:
+        print(status, file=sys.stderr)
+    chunk = indata[:, 0].astype(np.float64, copy=True)
+    chunk_ponderat = filtreaza_block(chunk)
+    play_pointer += len(chunk)
+    semnal_nefiltrat_complet.append(chunk.copy())
+    semnal_filtrat_complet.append(chunk_ponderat.copy())
+    trimite_date_live(chunk, chunk_ponderat)
 
 ########################################################
 ################ Interfata grafica (pyqtgraph) ##########
@@ -511,133 +637,7 @@ y_db_filtered = []
 ########################################################
 #################PORNIREA STREAMULUI####################
 
-stream = None########################################################
-######### FERESTRE DE TIMP PENTRU METERUL GENERAL ######
-########################################################
-
-if MODE.lower() == "fast":
-    WINDOW_SIZE = int(0.125 * SAMPLE_RATE)
-elif MODE.lower() == "slow":
-    WINDOW_SIZE = int(1.0 * SAMPLE_RATE)
-elif MODE.lower() == "peak":
-    WINDOW_SIZE = int(0.035 * SAMPLE_RATE)
-else:
-    print("not a mode. using fast")
-    WINDOW_SIZE = int(0.125 * SAMPLE_RATE)
-
-live_ring_buffer_raw = np.zeros(WINDOW_SIZE)
-live_ring_buffer_filtered = np.zeros(WINDOW_SIZE)
-hanning_window = np.hanning(WINDOW_SIZE)
-fft_frequencies = np.fft.rfftfreq(WINDOW_SIZE, d=1.0 / SAMPLE_RATE)
-
-FFT_DISPLAY_STEP = max(1, len(fft_frequencies) // 2000)
-fft_frequencies_disp = fft_frequencies[::FFT_DISPLAY_STEP]
-
-semnal_nefiltrat_complet = []
-semnal_filtrat_complet = []
-
-########################################################
-#############PROCESARE AUDIO SI ANALIZA#################
-
-def actualizeaza_ring_buffer(buffer, chunk):
-    frames = len(chunk)
-    if frames >= WINDOW_SIZE:
-        buffer[:] = chunk[-WINDOW_SIZE:]
-    else:
-        buffer[:] = np.roll(buffer, -frames)
-        buffer[-frames:] = chunk
-
-def calculeaza_db_fft(buffer):
-    rms = np.sqrt(np.mean(np.square(buffer)))
-    db = np.clip(20 * np.log10(rms + EPSILON), -120.0, 0.0)
-
-    windowed_signal = buffer * hanning_window
-    fft_raw = np.abs(np.fft.rfft(windowed_signal))
-    fft_norm = fft_raw / (WINDOW_SIZE / 2.0)
-    fft_db = np.clip(20 * np.log10(fft_norm + EPSILON), -120.0, 0.0)
-    return db, fft_db
-
-def calculeaza_peak_db(buffer):
-    peak = np.max(np.abs(buffer))
-    return float(np.clip(20 * np.log10(peak + EPSILON), -120.0, 0.0))
-
-def proceseaza_ambele_semnale(chunk_raw, chunk_ponderat):
-    actualizeaza_ring_buffer(live_ring_buffer_raw, chunk_raw)
-    actualizeaza_ring_buffer(live_ring_buffer_filtered, chunk_ponderat)
-
-    db_raw, fft_raw = calculeaza_db_fft(live_ring_buffer_raw)
-    db_filtered, fft_filtered = calculeaza_db_fft(live_ring_buffer_filtered)
-
-    return db_raw, db_filtered, fft_raw, fft_filtered
-
-peak_hold_state = {
-    "raw_db": -120.0,
-    "filt_db": -120.0,
-}
-
-def get_peak_hold_display(cheie, valoare_curenta):
-    val_key = f"{cheie}_db"
-    if valoare_curenta > peak_hold_state[val_key]:
-        peak_hold_state[val_key] = valoare_curenta
-    return peak_hold_state[val_key]
-
-def reseteaza_peak_hold():
-    peak_hold_state["raw_db"] = -120.0
-    peak_hold_state["filt_db"] = -120.0
-
-def trimite_date_live(chunk, chunk_ponderat):
-    current_time = play_pointer / SAMPLE_RATE
-
-    if PEAK_MODE:
-        actualizeaza_ring_buffer(live_ring_buffer_raw, chunk)
-        actualizeaza_ring_buffer(live_ring_buffer_filtered, chunk_ponderat)
-        db_raw = calculeaza_peak_db(live_ring_buffer_raw)
-        db_filtered = calculeaza_peak_db(live_ring_buffer_filtered)
-        data_queue.put((current_time, db_raw, db_filtered, None, None, None))
-    else:
-        db_raw, db_filtered, fft_raw, fft_filtered = proceseaza_ambele_semnale(
-            chunk, chunk_ponderat
-        )
-        niveluri_benzi = proceseaza_benzi(chunk_ponderat) if plot_bands is not None else None
-        data_queue.put((
-            current_time,
-            db_raw,
-            db_filtered,
-            fft_raw[::FFT_DISPLAY_STEP],
-            fft_filtered[::FFT_DISPLAY_STEP],
-            niveluri_benzi,
-        ))
-
-def playback_callback(outdata, frames, time_info, status):
-    global play_pointer
-    if status:
-        print(status, file=sys.stderr)
-    chunk = AUDIO_NORM[play_pointer:play_pointer + frames]
-    valid_frames = len(chunk)
-    if valid_frames == 0:
-        outdata.fill(0)
-        raise sd.CallbackStop()
-    chunk_ponderat = filtreaza_block(chunk)
-    outdata.fill(0)
-    outdata[:valid_frames, 0] = chunk_ponderat
-    play_pointer += valid_frames
-    semnal_nefiltrat_complet.append(chunk.copy())
-    semnal_filtrat_complet.append(chunk_ponderat.copy())
-    trimite_date_live(chunk, chunk_ponderat)
-    if valid_frames < frames:
-        raise sd.CallbackStop()
-
-def record_callback(indata, frames, time_info, status):
-    global play_pointer
-    if status:
-        print(status, file=sys.stderr)
-    chunk = indata[:, 0].astype(np.float64, copy=True)
-    chunk_ponderat = filtreaza_block(chunk)
-    play_pointer += len(chunk)
-    semnal_nefiltrat_complet.append(chunk.copy())
-    semnal_filtrat_complet.append(chunk_ponderat.copy())
-    trimite_date_live(chunk, chunk_ponderat)
-
+stream = None
 running = {"active": True}
 
 def on_close(event=None):
