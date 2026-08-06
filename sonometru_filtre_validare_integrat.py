@@ -5,7 +5,7 @@ import time
 import queue
 import numpy as np
 from scipy.io import wavfile
-from scipy.signal import sosfilt, sosfilt_zi, butter, bilinear_zpk, zpk2sos
+from scipy.signal import sosfilt, sosfilt_zi, butter, bilinear_zpk, zpk2sos, sosfreqz
 
 ## pentru ignorare avertismente wav
 warnings.filterwarnings("ignore", category=UserWarning, module="scipy.io.wavfile")
@@ -113,7 +113,7 @@ print("\n~~~~~SELECTIE PONDERARE (WEIGHTING)~~~~~")
 print("1 A-Weighting (IEC 61672)")
 print("2 C-Weighting (IEC 61672)")
 print("3 Z-Weighting (flat, semnal nemodificat)")
-PONDERARE_OPT = input("> ").strip().lower()
+PONDERARE_OPT = input("\nMod (1=sonometru, 2=validare filtre): ").strip()
 
 if PONDERARE_OPT in ("1", "a", "a-weighting", "a-weight"):
     TIP_PONDERARE = "A-Weighting"
@@ -243,6 +243,80 @@ def filtreaza_block(chunk):
         return chunk.copy()
     chunk_ponderat, zi_ponderare = sosfilt(sos_ponderare, chunk, zi=zi_ponderare)
     return chunk_ponderat
+
+
+
+########################################################
+######## VALIDARE CARACTERISTICA FILTRE IEC ############
+########################################################
+
+def afiseaza_raspuns_filtru(sos, fs, nume):
+
+    freqs, h = sosfreqz(
+        sos,
+        worN=32768,
+        fs=fs
+    )
+
+    h_db = 20 * np.log10(np.abs(h) + EPSILON)
+
+    win = pg.GraphicsLayoutWidget(
+        title=f"Caracteristica {nume}"
+    )
+    win.resize(1100, 600)
+    win.show()
+
+    plot = win.addPlot(
+        title=f"Raspuns in frecventa - {nume}"
+    )
+
+    plot.setLabel("bottom", "Frecventa", units="Hz")
+    plot.setLabel("left", "Magnitudine", units="dB")
+
+    plot.setLogMode(x=True, y=False)
+    plot.setXRange(np.log10(10), np.log10(25000))
+    plot.setYRange(-80, 10)
+
+    plot.showGrid(x=True, y=True)
+    plot.addLegend()
+
+    plot.plot(
+        freqs,
+        h_db,
+        pen=pg.mkPen(width=3),
+        name=nume
+    )
+
+    plot.plot(
+        [10, 25000],
+        [0, 0],
+        pen=pg.mkPen(width=1),
+        name="0 dB"
+    )
+
+
+def ruleaza_validare_filtre():
+
+    print("Pornire validare filtre A/C")
+
+    a = get_a_weighting_filter(48000)
+    c = get_c_weighting_filter(48000)
+
+    afiseaza_raspuns_filtru(
+        a,
+        48000,
+        "A Weighting"
+    )
+
+    afiseaza_raspuns_filtru(
+        c,
+        48000,
+        "C Weighting"
+    )
+
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+    app.exec_()
+
 
 ########################################################
 ##### BANC DE FILTRE PE BENZI DE OCTAVA (IEC 61260-1) ###
