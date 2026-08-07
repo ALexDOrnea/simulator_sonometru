@@ -172,7 +172,7 @@ print(f"Constanta de calibrare folosita: {CALIBRARE_DB:+.2f} dB")
 
 ###########################################
 #########Setari initiale DSP###############
-SAMPLE_RATE = 44100
+SAMPLE_RATE = 48000
 EPSILON = 1e-12
 AUDIO_NORM = None
 data_queue = queue.Queue()
@@ -208,7 +208,7 @@ nyquist = SAMPLE_RATE / 2.0
 
 def get_a_weighting_filter(fs):
     f1, f2, f3, f4 = 20.598997, 107.65265, 737.86223, 12194.217
-    A1000 = -2.000
+    A1000 = 1.9997
     p1, p2, p3, p4 = -2*np.pi*f1, -2*np.pi*f2, -2*np.pi*f3, -2*np.pi*f4
     z = [0, 0, 0, 0]
     p = [p1, p1, p2, p3, p4, p4]
@@ -218,7 +218,7 @@ def get_a_weighting_filter(fs):
 
 def get_c_weighting_filter(fs):
     f1, f4 = 20.598997, 12194.217
-    C1000 = -0.062
+    C1000 = 0.0619
     p1, p4 = -2*np.pi*f1, -2*np.pi*f4
     z = [0, 0]
     p = [p1, p1, p4, p4]
@@ -868,3 +868,6 @@ finally:
             name=f"Spectru {TIP_PONDERARE}",
         )
         app2.exec_()
+
+        #119.9
+        #117

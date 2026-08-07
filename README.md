@@ -14,3 +14,9 @@ Dependente:
 * numpy
 * scipy
 * sounddevice
+
+Tasks
+* verificare mod mediere fereastra
+* despartire cod in 2 threaduri: thread de obtinere date audio si thread de procesare
+* verificare caracteristica diferite microfoane
+* optimizare gui
