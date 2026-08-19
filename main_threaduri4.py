@@ -373,7 +373,7 @@ def frecventa_centrala_exacta(x, b):
 def design_octave_bands(fs, b, fmin=20.0, fmax=20000.0):
     nyq = fs / 2.0
     fmax = min(fmax, nyq * 0.98)
-    ordin = 12
+    ordin = 6
 
     x_min = int(np.floor(b * np.log(fmin / FREQ_REF) / np.log(OCTAVE_G))) - 1
     x_max = int(np.ceil(b * np.log(fmax / FREQ_REF) / np.log(OCTAVE_G))) + 1

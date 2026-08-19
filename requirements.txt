@@ -5,3 +5,4 @@
  pyqtgraph
  pyqt5
  pyinstaller
+ snakeviz
