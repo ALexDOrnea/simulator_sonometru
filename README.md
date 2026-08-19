@@ -20,3 +20,5 @@ Tasks
 * despartire cod in 2 threaduri: thread de obtinere date audio si thread de procesare
 * verificare caracteristica diferite microfoane
 * optimizare gui
+
+test
