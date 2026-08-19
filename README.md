@@ -16,9 +16,9 @@ Dependente:
 * sounddevice
 
 Tasks
-* verificare mod mediere fereastra
-* despartire cod in 2 threaduri: thread de obtinere date audio si thread de procesare
+* verificare mod mediere fereastra -- parca am facut
+* despartire cod in 2 threaduri: thread de obtinere date audio si thread de procesare -- facut
 * verificare caracteristica diferite microfoane
-* optimizare gui
+* optimizare gui -- facut partial
 
 test
