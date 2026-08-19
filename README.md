@@ -14,6 +14,10 @@ Dependente:
 * numpy
 * scipy
 * sounddevice
+* pyqtgraph
+* pyqt5
+* pyinstaller
+* snakeviz (optional)
 
 Tasks
 * verificare mod mediere fereastra -- parca am facut
