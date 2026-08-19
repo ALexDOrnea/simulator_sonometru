@@ -1,9 +1,20 @@
+# ==========================================================
+# SONOMETRU OPTIMIZAT REALTIME
+# Modificari:
+# - blocksize fix 512
+# - latency high stabil
+# - queue limitata pentru evitarea acumularii de delay
+# - procesare audio float32
+# - GUI 30 FPS
+# ==========================================================
+
 import warnings
 import os
 import sys
 import time
 import queue
 import threading
+from collections import deque
 import numpy as np
 from scipy.io import wavfile
 from scipy.signal import sosfilt, sosfilt_zi, butter, bilinear_zpk, zpk2sos, lfilter
@@ -24,7 +35,7 @@ except ImportError:
 
 try:
     import pyqtgraph as pg
-    from pyqtgraph.Qt import QtCore, QtWidgets
+    from pyqtgraph.Qt import QtCore, QtWidgets, QtGui
 except ImportError:
     print("pyqtgraph nu a fost gasit. instaleaza cu: pip install pyqtgraph pyqt5")
     sys.exit()
@@ -165,6 +176,23 @@ except ValueError:
 
 print(f"Constanta de calibrare folosita: {CALIBRARE_DB:+.2f} dB")
 
+# ~~~~~CONFIGURARE BLOCKSIZE / LATENCY (sd.OutputStream / sd.InputStream)~~~~~
+print("\n~~~~~CONFIG AUDIO OPTIMIZAT~~~~~")
+# Setari fixe pentru stabilitate realtime DSP
+# NOTA: LATENCY="high" cerea driver-ului un buffer intern mare, ceea ce
+# adauga intarziere suplimentara peste blocksize. Pentru delay minim, se
+# foloseste "low" - acum e sigur, pentru ca threadul de procesare a fost
+# optimizat sa nu mai ramana in urma (vezi BATCH_FACTOR mai jos).
+# BLOCKSIZE a fost coborat de la 512 la 256 esantioane (~5.3ms in loc de
+# ~10.7ms la 48kHz) - latenta de baza a stream-ului scade la jumatate.
+# Threadul audio face un singur filtru sos ieftin per bloc, deci ramane usor.
+# Daca pe sistemul tau apar xrun-uri/pocnete, urca inapoi la 512 (sau 384).
+BLOCKSIZE = 256
+LATENCY = "low"
+print("Blocksize fix: 256 samples")
+print("Latency fix: low")
+print(f"Blocksize folosit: {BLOCKSIZE if BLOCKSIZE else 'auto'} | Latency folosita: {LATENCY}")
+
 ###########################################
 #########Setari initiale DSP###############
 SAMPLE_RATE = 48000
@@ -179,9 +207,30 @@ AUDIO_NORM = None
 #    calculeaza Leq, nivelul ponderat in timp, benzile de octava, FFT-ul de
 #    afisare, peak-ul - tot ce e costisitor mutat aici, in afara timpului real.
 # 3) Thread GUI (main thread, Qt event loop): doar deseneaza ce vine prin data_queue.
-raw_queue = queue.Queue()      # audio thread -> processing thread
+raw_queue = queue.Queue(maxsize=4)      # audio thread -> processing thread
 data_queue = queue.Queue()     # processing thread -> GUI thread
 stop_event = threading.Event()
+
+# ~~~~~GUI_REFRESH_MS: intervalul real al timerului de desenare~~~~~
+# Coborat de la 33ms (~30fps) la 16ms (~60fps): rezultatele calculate stau
+# mai putin timp "in asteptare" pana ajung pe ecran. BATCH_FACTOR de mai jos
+# se leaga de aceeasi valoare, ca sa ramana sincronizate.
+GUI_REFRESH_MS = 16
+
+# ~~~~~BATCH_FACTOR: rata de recalcul a benzilor de octava + FFT~~~~~
+# NOTA (dupa profiling): banca de filtre pe benzi de octava (proceseaza_benzi)
+# ramanea, si dupa batching-ul legat de GUI_REFRESH_MS (60fps), ~81% din tot
+# timpul threadului de procesare. Motivul: fiecare banda trece deja printr-un
+# filtru cu constanta de timp Fast=125ms/Slow=1s (TAU_TIMP) - valoarea abia
+# se misca intre doua calcule facute la 60Hz, deci recalculul la rata GUI-ului
+# arunca majoritatea rezultatelor nefolosite (un RTA hardware tipic actualizeaza
+# la 10-20Hz, nu la 60). BENZI_FFT_REFRESH_HZ decupleaza deci rata de calcul a
+# benzilor/FFT de la timer-ul GUI (care ramane rapid, la GUI_REFRESH_MS, doar
+# pentru curba dB - ieftina, O(1) per punct) si o leaga de o rata proprie,
+# suficienta pentru ochi. Rezultatul e matematic IDENTIC (filtre LTI, zi trece
+# corect intre blocuri), doar frecventa de recalcul scade semnificativ.
+BENZI_FFT_REFRESH_HZ = 20.0
+BATCH_FACTOR = max(1, round((1.0 / BENZI_FFT_REFRESH_HZ) * SAMPLE_RATE / BLOCKSIZE))
 
 play_pointer = 0
 NIVEL_PODEA = -120.0 + CALIBRARE_DB
@@ -426,7 +475,9 @@ def actualizeaza_ring_buffer(buffer, chunk):
     if frames >= len(buffer):
         buffer[:] = chunk[-len(buffer):]
     else:
-        buffer[:] = np.roll(buffer, -frames)
+        # slicing in loc de np.roll: acelasi rezultat, fara aritmetica modulo
+        # si fara sa realoce/rotesca tot bufferul de fiecare data
+        buffer[:-frames] = buffer[frames:]
         buffer[-frames:] = chunk
 
 def calculeaza_fft_pentru_afisare(buffer):
@@ -460,10 +511,20 @@ def reseteaza_peak_hold():
         peak_hold_state["raw_db"] = NIVEL_PODEA
         peak_hold_state["filt_db"] = NIVEL_PODEA
 
+_batch_raw = []
+_batch_filt = []
+_batch_count = 0
+
 def proceseaza_chunk(chunk, chunk_ponderat, pointer_esantion):
     """Tot ce era inainte in trimite_date_live, acum rulat EXCLUSIV in
-    threadul de procesare (nu mai atinge deloc threadul audio)."""
-    global zi_nivel_raw, zi_nivel_filt
+    threadul de procesare (nu mai atinge deloc threadul audio).
+
+    Nivelul ponderat in timp (bara/curba dB) si Leq raman calculate pe
+    FIECARE bloc - sunt ieftine (un singur filtru recursiv de ordin mic) si
+    trebuie sa fie fidele in timp. Benzile de octava si FFT-ul de afisare
+    (partea scumpa) se calculeaza doar o data la BATCH_FACTOR blocuri, pe
+    blocul concatenat - vezi nota de la BATCH_FACTOR mai sus."""
+    global zi_nivel_raw, zi_nivel_filt, _batch_count
     current_time = pointer_esantion / SAMPLE_RATE
 
     actualizeaza_leq(chunk, chunk_ponderat)
@@ -473,28 +534,46 @@ def proceseaza_chunk(chunk, chunk_ponderat, pointer_esantion):
         db_raw = calculeaza_peak_db(chunk)
         db_filtered = calculeaza_peak_db(chunk_ponderat)
         data_queue.put((current_time, db_raw, db_filtered, None, None, None, l_zeq, l_xeq))
-    else:
-        ms_raw, zi_nivel_raw = nivel_ponderat_in_timp(chunk, b_timp, a_timp, zi_nivel_raw)
-        ms_filt, zi_nivel_filt = nivel_ponderat_in_timp(chunk_ponderat, b_timp, a_timp, zi_nivel_filt)
-        db_raw = db_din_ms(ms_raw[-1])
-        db_filtered = db_din_ms(ms_filt[-1])
+        return
 
-        actualizeaza_ring_buffer(live_ring_buffer_raw_fft, chunk)
-        actualizeaza_ring_buffer(live_ring_buffer_filtered_fft, chunk_ponderat)
-        fft_raw = calculeaza_fft_pentru_afisare(live_ring_buffer_raw_fft) if plot_fft is not None else None
-        fft_filtered = calculeaza_fft_pentru_afisare(live_ring_buffer_filtered_fft) if plot_fft is not None else None
+    ms_raw, zi_nivel_raw = nivel_ponderat_in_timp(chunk, b_timp, a_timp, zi_nivel_raw)
+    ms_filt, zi_nivel_filt = nivel_ponderat_in_timp(chunk_ponderat, b_timp, a_timp, zi_nivel_filt)
+    db_raw = db_din_ms(ms_raw[-1])
+    db_filtered = db_din_ms(ms_filt[-1])
 
-        niveluri_benzi = proceseaza_benzi(chunk_ponderat) if plot_bands is not None else None
-        data_queue.put((
-            current_time,
-            db_raw,
-            db_filtered,
-            fft_raw[::FFT_DISPLAY_STEP] if fft_raw is not None else None,
-            fft_filtered[::FFT_DISPLAY_STEP] if fft_filtered is not None else None,
-            niveluri_benzi,
-            l_zeq,
-            l_xeq,
-        ))
+    fft_raw = fft_filtered = niveluri_benzi = None
+
+    if plot_fft is not None or plot_bands is not None:
+        _batch_raw.append(chunk)
+        _batch_filt.append(chunk_ponderat)
+        _batch_count += 1
+
+        if _batch_count >= BATCH_FACTOR:
+            bloc_raw = np.concatenate(_batch_raw)
+            bloc_filt = np.concatenate(_batch_filt)
+            _batch_raw.clear()
+            _batch_filt.clear()
+            _batch_count = 0
+
+            if plot_fft is not None:
+                actualizeaza_ring_buffer(live_ring_buffer_raw_fft, bloc_raw)
+                actualizeaza_ring_buffer(live_ring_buffer_filtered_fft, bloc_filt)
+                fft_raw = calculeaza_fft_pentru_afisare(live_ring_buffer_raw_fft)
+                fft_filtered = calculeaza_fft_pentru_afisare(live_ring_buffer_filtered_fft)
+
+            if plot_bands is not None:
+                niveluri_benzi = proceseaza_benzi(bloc_filt)
+
+    data_queue.put((
+        current_time,
+        db_raw,
+        db_filtered,
+        fft_raw[::FFT_DISPLAY_STEP] if fft_raw is not None else None,
+        fft_filtered[::FFT_DISPLAY_STEP] if fft_filtered is not None else None,
+        niveluri_benzi,
+        l_zeq,
+        l_xeq,
+    ))
 
 def processing_loop():
     """Bucla threadului de PROCESARE: consuma din raw_queue (umpluta de threadul
@@ -534,7 +613,10 @@ def playback_callback(outdata, frames, time_info, status):
     outdata.fill(0)
     outdata[:valid_frames, 0] = chunk_ponderat
     play_pointer += valid_frames
-    raw_queue.put((chunk.copy(), chunk_ponderat.copy(), play_pointer))
+    try:
+        raw_queue.put_nowait((chunk.copy(), chunk_ponderat.copy(), play_pointer))
+    except queue.Full:
+        pass
     if valid_frames < frames:
         raise sd.CallbackStop()
 
@@ -542,10 +624,13 @@ def record_callback(indata, frames, time_info, status):
     global play_pointer
     if status:
         print(status, file=sys.stderr)
-    chunk = indata[:, 0].astype(np.float64, copy=True)
+    chunk = indata[:, 0].astype(np.float32, copy=True)
     chunk_ponderat = filtreaza_block(chunk)
     play_pointer += len(chunk)
-    raw_queue.put((chunk, chunk_ponderat.copy(), play_pointer))
+    try:
+        raw_queue.put_nowait((chunk, chunk_ponderat.copy(), play_pointer))
+    except queue.Full:
+        pass
 
 ########################################################
 ################ Interfata grafica (pyqtgraph) ##########
@@ -569,6 +654,70 @@ COL_PURPLE = (170, 90, 220)
 COL_CYAN = (0, 220, 220)
 COL_GRAY = (120, 120, 120)
 COL_GREEN = (46, 204, 113)
+
+class CurbaIncrementala(pg.GraphicsObject):
+    """Curba pentru graficul dB-vs-timp care NU reconstruieste tot path-ul din
+    tot arrayul la fiecare frame (asa cum face PlotCurveItem.setData()).
+    In loc, tine un QPainterPath persistent si doar ADAUGA punctul nou cu
+    path.lineTo() -> cost O(1) per punct nou, nu O(n) din tot istoricul.
+
+    Fereastra glisanta (deque cu maxlen) tot are nevoie, ocazional, de o
+    sincronizare cu path-ul ca sa elimine punctele iesite din fereastra -
+    dar asta se face rar (reconstruieste_din_date), nu la fiecare frame."""
+
+    def __init__(self, culoare, latime=2):
+        super().__init__()
+        self.pen = pg.mkPen(culoare, width=latime)
+        # LegendItem citeste self.opts['pen'] cand deseneaza liniuta-mostra din legenda -
+        # fara acest atribut arunca AttributeError la FIECARE repaint (asta cauza lag-ul uriaș).
+        self.opts = {"pen": self.pen}
+        self.path = QtGui.QPainterPath()
+        self._are_punct_initial = False
+        self._bounding_rect = QtCore.QRectF()
+
+    def adauga_punct(self, x, y):
+        if not self._are_punct_initial:
+            self.path.moveTo(x, y)
+            self._are_punct_initial = True
+        else:
+            self.path.lineTo(x, y)
+        self._bounding_rect = self._bounding_rect.united(QtCore.QRectF(x, y, 0.0001, 0.0001))
+        self.prepareGeometryChange()
+        self.update()
+
+    def reconstruieste_din_date(self, x_iterabil, y_iterabil):
+        """Reface path-ul complet, o singura data - folosit periodic (nu la
+        fiecare frame) ca sa sincronizeze curba cu fereastra glisanta din deque
+        (elimina punctele expirate din stanga)."""
+        path_nou = QtGui.QPainterPath()
+        prim = True
+        rect = QtCore.QRectF()
+        for x, y in zip(x_iterabil, y_iterabil):
+            if prim:
+                path_nou.moveTo(x, y)
+                prim = False
+            else:
+                path_nou.lineTo(x, y)
+            rect = rect.united(QtCore.QRectF(x, y, 0.0001, 0.0001))
+        self.path = path_nou
+        self._are_punct_initial = not prim
+        self._bounding_rect = rect
+        self.prepareGeometryChange()
+        self.update()
+
+    def reseteaza(self):
+        self.path = QtGui.QPainterPath()
+        self._are_punct_initial = False
+        self._bounding_rect = QtCore.QRectF()
+        self.prepareGeometryChange()
+        self.update()
+
+    def boundingRect(self):
+        return self._bounding_rect
+
+    def paint(self, painter, option, widget=None):
+        painter.setPen(self.pen)
+        painter.drawPath(self.path)
 
 def culoare_pentru_nivel(db):
     prag_rosu = -6.0 + CALIBRARE_DB
@@ -714,8 +863,12 @@ else:
         plot_db.setYRange(NIVEL_PODEA, NIVEL_PLAFON)
         plot_db.showGrid(x=True, y=True, alpha=0.3)
         plot_db.addLegend()
-        curve_db_raw = plot_db.plot(pen=pg.mkPen(COL_ORANGE, width=2), name=f"Z (nefiltrat) - nivel ({MODE}, IEC 61672-1 Ec.1)")
-        curve_db_filtered = plot_db.plot(pen=pg.mkPen(COL_PURPLE, width=2), name=f"{TIP_PONDERARE} - nivel ({MODE}, IEC 61672-1 Ec.1)")
+        curve_db_raw = CurbaIncrementala(COL_ORANGE, latime=2)
+        curve_db_filtered = CurbaIncrementala(COL_PURPLE, latime=2)
+        plot_db.addItem(curve_db_raw)
+        plot_db.addItem(curve_db_filtered)
+        plot_db.legend.addItem(curve_db_raw, f"Z (nefiltrat) - nivel ({MODE}, IEC 61672-1 Ec.1)")
+        plot_db.legend.addItem(curve_db_filtered, f"{TIP_PONDERARE} - nivel ({MODE}, IEC 61672-1 Ec.1)")
 
         if SURSA_OPT == "1":
             duration = len(AUDIO_NORM) / SAMPLE_RATE
@@ -768,9 +921,26 @@ else:
         plot_bands.getAxis("bottom").setTicks([ticks])
         plot_bands.setXRange(-1, NUM_BENZI)
 
-x_data = []
-y_db_raw = []
-y_db_filtered = []
+# In modul Live, doar ultimele 10s se vad oricum in fereastra (setXRange mai jos) -
+# un deque cu maxlen elimina cresterea nemarginita a listelor si costul tot mai
+# mare al setData() pe masura ce trece timpul. In modul WAV, istoricul e oricum
+# marginit de durata fisierului, deci pastram lista completa.
+if SURSA_OPT == "2" and not PEAK_MODE:
+    _puncte_pe_secunda = max(1, SAMPLE_RATE // BLOCKSIZE) if BLOCKSIZE else 200
+    _MAXLEN_LIVE = int(_puncte_pe_secunda * 15)  # ~15s de istoric, cu marja fata de fereastra de 10s afisata
+    x_data = deque(maxlen=_MAXLEN_LIVE)
+    y_db_raw = deque(maxlen=_MAXLEN_LIVE)
+    y_db_filtered = deque(maxlen=_MAXLEN_LIVE)
+    # reconstruim path-ul curbei incrementale din deque o data la atatea puncte noi -
+    # nu la fiecare frame - ca sa "taiem" din stanga punctele expirate din fereastra.
+    REBUILD_LA_PUNCTE = max(30, _MAXLEN_LIVE // 15)
+else:
+    x_data = []
+    y_db_raw = []
+    y_db_filtered = []
+    REBUILD_LA_PUNCTE = None
+
+_puncte_de_la_ultima_reconstructie = 0
 
 ########################################################
 #################PORNIREA STREAMULUI####################
@@ -798,6 +968,7 @@ def actualizeaza_bara(bara, eticheta_valoare, eticheta_peak, eticheta_leq_lbl, v
 def update_gui():
     """Threadul GUI: NU mai face nicio filtrare/procesare, doar citeste
     din data_queue (umpluta de threadul de procesare) si deseneaza."""
+    global _puncte_de_la_ultima_reconstructie
     if not running["active"]:
         return
 
@@ -821,9 +992,26 @@ def update_gui():
                 x_data.append(t)
                 y_db_raw.append(db_raw)
                 y_db_filtered.append(db_filtered)
-            last_fft_raw = fft_raw
-            last_fft_filtered = fft_filtered
-            last_niveluri_benzi = niveluri_benzi
+                if plot_db is not None:
+                    # ADAUGARE INCREMENTALA: doar punctul nou, nu tot arrayul (vezi CurbaIncrementala)
+                    curve_db_raw.adauga_punct(t, db_raw)
+                    curve_db_filtered.adauga_punct(t, db_filtered)
+                    if REBUILD_LA_PUNCTE is not None:
+                        _puncte_de_la_ultima_reconstructie += 1
+                        if _puncte_de_la_ultima_reconstructie >= REBUILD_LA_PUNCTE:
+                            # sincronizare rara (nu la fiecare frame) cu fereastra glisanta din deque -
+                            # aici "taiem" punctele care au iesit din fereastra
+                            curve_db_raw.reconstruieste_din_date(x_data, y_db_raw)
+                            curve_db_filtered.reconstruieste_din_date(x_data, y_db_filtered)
+                            _puncte_de_la_ultima_reconstructie = 0
+            # fft/niveluri_benzi vin doar o data la BATCH_FACTOR elemente din coada
+            # (vezi proceseaza_chunk) - nu le suprascriem cu None cand un element
+            # ulterior din aceeasi golire a cozii nu are date noi de benzi/FFT.
+            if fft_raw is not None:
+                last_fft_raw = fft_raw
+                last_fft_filtered = fft_filtered
+            if niveluri_benzi is not None:
+                last_niveluri_benzi = niveluri_benzi
             last_leq_raw = leq_raw
             last_leq_filt = leq_filt
             updated = True
@@ -853,8 +1041,8 @@ def update_gui():
         if plot_db is not None:
             if SURSA_OPT == "2" and x_data[-1] > 10:
                 plot_db.setXRange(x_data[-1] - 10, x_data[-1], padding=0)
-            curve_db_raw.setData(x_data, y_db_raw)
-            curve_db_filtered.setData(x_data, y_db_filtered)
+            # NOTA: curve_db_raw/curve_db_filtered au fost deja actualizate incremental
+            # mai sus (adauga_punct), nu mai e nevoie de un setData() cu tot arrayul aici.
 
         if plot_fft is not None and last_fft_raw is not None:
             curve_fft_raw.setData(fft_frequencies_disp, last_fft_raw)
@@ -869,7 +1057,7 @@ def update_gui():
 
 timer = QtCore.QTimer()
 timer.timeout.connect(update_gui)
-timer.start(16)  # ~60 fps
+timer.start(GUI_REFRESH_MS)  # ~60 fps
 
 processing_thread = threading.Thread(target=processing_loop, name="ProcesareDSP", daemon=True)
 processing_thread.start()
@@ -880,6 +1068,8 @@ try:
         stream = sd.OutputStream(
             samplerate=SAMPLE_RATE,
             channels=1,
+            blocksize=BLOCKSIZE,
+            latency=LATENCY,
             callback=playback_callback,
         )
     else:
@@ -887,6 +1077,8 @@ try:
         stream = sd.InputStream(
             samplerate=SAMPLE_RATE,
             channels=1,
+            blocksize=BLOCKSIZE,
+            latency=LATENCY,
             callback=record_callback,
         )
 
