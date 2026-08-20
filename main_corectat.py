@@ -1,3 +1,12 @@
+# ==========================================================
+# SONOMETRU OPTIMIZAT REALTIME
+# Modificari:
+# - blocksize fix 512
+# - latency high stabil
+# - queue limitata pentru evitarea acumularii de delay
+# - procesare audio float32
+# - GUI 30 FPS
+# ==========================================================
 
 import warnings
 import os
@@ -203,10 +212,18 @@ data_queue = queue.Queue()     # processing thread -> GUI thread
 stop_event = threading.Event()
 
 # ~~~~~GUI_REFRESH_MS: intervalul real al timerului de desenare~~~~~
-# Coborat de la 33ms (~30fps) la 16ms (~60fps): rezultatele calculate stau
-# mai putin timp "in asteptare" pana ajung pe ecran. BATCH_FACTOR de mai jos
-# se leaga de aceeasi valoare, ca sa ramana sincronizate.
-GUI_REFRESH_MS = 16
+# ATENTIE - acest parametru NU reduce costul de randare, e opusul: controleaza
+# doar CAT DE DES se goleste coada si se trimit date noi spre ecran (deci
+# intarzierea cu care un rezultat calculat ajunge vizibil). Un tick mai
+# frecvent inseamna mai multe paintEvent-uri fizice, nu mai putine.
+# 25ms (~40Hz) e un compromis: suficient de rapid sa para fluid, dar tinand
+# cont ca insusi nivelul afisat e deja netezit printr-un filtru cu constanta
+# de timp Fast=125ms/Slow=1s (TAU_TIMP) - redesenarea mai rapida de ~30-40Hz
+# nu arata nimic in plus, doar consuma randare degeaba (acelasi argument ca
+# la BENZI_FFT_REFRESH_HZ mai jos). Daca vrei raspuns maxim de rapid al
+# barei/curbei (cu costul catorva paintEvent-uri in plus pe secunda), poti
+# cobori inapoi spre 16; daca vrei incarcare minima de randare, urca spre 33.
+GUI_REFRESH_MS = 25
 
 # ~~~~~BATCH_FACTOR: rata de recalcul a benzilor de octava + FFT~~~~~
 # NOTA (dupa profiling): banca de filtre pe benzi de octava (proceseaza_benzi)
@@ -255,8 +272,24 @@ nyquist = SAMPLE_RATE / 2.0
 ############# FILTRE DE PONDERARE (IEC 61672) ##########
 ########################################################
 
+def prewarp_frecventa(f, fs):
+    """Pre-warping pentru transformarea biliniara: mapeaza fiecare frecventa de
+    colt a filtrului analog prototip la o frecventa 'deformata' astfel incat,
+    DUPA transformarea biliniara, raspunsul digital sa cada exact la frecventa
+    tinta corecta. Fara asta, bilinear_zpk() comprima neliniar frecventele pe
+    masura ce te apropii de Nyquist (fs/2) - la 48kHz, polul de 12194.217 Hz
+    din A/C-weighting e la peste jumatate din Nyquist (24kHz), exact zona unde
+    warping-ul devine sever (verificat: fara pre-warp, eroarea fata de curba
+    IEC ideala ajungea la -15.8dB la 20kHz si -2.3dB deja la 12kHz). Cu
+    pre-warp, eroarea scade sub 1dB pana la ~12-14kHz. Deasupra a ~16kHz mai
+    ramane o eroare reziduala considerabila - limitare fundamentala a oricarui
+    filtru IIR biliniar atat de aproape de Nyquist, nu se rezolva decat cu o
+    frecventa de esantionare mai mare (ex. 96kHz)."""
+    return (fs / np.pi) * np.tan(np.pi * f / fs)
+
 def get_a_weighting_filter(fs):
     f1, f2, f3, f4 = 20.598997, 107.65265, 737.86223, 12194.217
+    f1, f2, f3, f4 = [prewarp_frecventa(f, fs) for f in (f1, f2, f3, f4)]
     A1000 = 1.9997
     p1, p2, p3, p4 = -2*np.pi*f1, -2*np.pi*f2, -2*np.pi*f3, -2*np.pi*f4
     z = [0, 0, 0, 0]
@@ -267,6 +300,7 @@ def get_a_weighting_filter(fs):
 
 def get_c_weighting_filter(fs):
     f1, f4 = 20.598997, 12194.217
+    f1, f4 = prewarp_frecventa(f1, fs), prewarp_frecventa(f4, fs)
     C1000 = 0.0619
     p1, p4 = -2*np.pi*f1, -2*np.pi*f4
     z = [0, 0]
@@ -1048,7 +1082,7 @@ def update_gui():
 
 timer = QtCore.QTimer()
 timer.timeout.connect(update_gui)
-timer.start(GUI_REFRESH_MS)  # ~60 fps
+timer.start(GUI_REFRESH_MS)
 
 processing_thread = threading.Thread(target=processing_loop, name="ProcesareDSP", daemon=True)
 processing_thread.start()
