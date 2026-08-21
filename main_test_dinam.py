@@ -361,6 +361,106 @@ def filtreaza_block(chunk):
     return chunk_ponderat
 
 ########################################################
+##### CORECTIE CURBA MICROFON (compensare raspuns) ######
+########################################################
+# Filtru IIR (cascada biquad-uri EQ parametric, formule RBJ) care aplica
+# INVERSUL curbei de calibrare individuale a microfonului, astfel incat
+# raspunsul final sa fie cat mai aproape de plat. Se aplica DOAR pe semnalul
+# de la microfon (SURSA_OPT=="2"), niciodata pe redarea unui WAV - acolo nu
+# exista microfon in lant, deci nimic de corectat.
+# Fisier ales: 30degree (montaj cu incidenta oblica, nu axiala - vezi poza
+# cu suportul dublu microfon-test/B&K, unghi ~20-30 grade fata de difuzor).
+
+CALE_CALIBRARE_MICROFON = "35Y228_cal_0degree.txt"
+
+def incarca_curba_calibrare(path):
+    """Citeste fisierul de calibrare (2 coloane: frecventa Hz, deviatie dB),
+    exportat pentru exemplarul individual de microfon."""
+    date = np.loadtxt(path)
+    return date[:, 0], date[:, 1]
+
+# def construieste_filtru_corectie(fs, freq_cal, dev_cal_db, n_benzi=24, fmin=20.0, fmax=20000.0):
+#     """Cascada de filtre EQ parametrice (peaking biquads) care aproximeaza
+#     inversul curbei de calibrare la n_benzi frecvente esalonate logaritmic
+#     (implicit 24 ~ 1/3 octava). Nu e o potrivire exacta punct-cu-punct (ar
+#     cere sute de filtre), dar prinde bine tendintele curbei - suficient
+#     pentru o corectie de ordinul a catorva dB."""
+#     frecvente_banda = np.geomspace(fmin, fmax, n_benzi)
+#     deviatii = np.interp(frecvente_banda, freq_cal, dev_cal_db)
+
+#     Q = 4.318  # latime de banda ~1/3 octava (formula RBJ standard)
+#     sos_total = []
+#     for f0, dev_db in zip(frecvente_banda, deviatii):
+#         if f0 >= fs / 2.0 * 0.98:
+#             continue
+#         gain_db = -dev_db  # corectam INVERS deviatia microfonului
+#         if abs(gain_db) < 0.02:
+#             continue  # corectii neglijabile, nu merita cost de calcul
+
+#         A = 10 ** (gain_db / 40.0)
+#         w0 = 2 * np.pi * f0 / fs
+#         alpha = np.sin(w0) / (2 * Q)
+#         cos_w0 = np.cos(w0)
+
+#         b0 = 1 + alpha * A
+#         b1 = -2 * cos_w0
+#         b2 = 1 - alpha * A
+#         a0 = 1 + alpha / A
+#         a1 = -2 * cos_w0
+#         a2 = 1 - alpha / A
+
+#         sos_total.append([b0 / a0, b1 / a0, b2 / a0, 1.0, a1 / a0, a2 / a0])
+
+#     if not sos_total:
+#         return None
+#     return np.array(sos_total)
+def construieste_filtru_corectie(fs, freq_cal, dev_cal_db, numtaps=513):
+    """FIR proiectat prin frequency-sampling (firwin2), care reproduce DIRECT
+    inversul curbei de calibrare, fara acumulare de gain din filtre suprapuse
+    (spre deosebire de cascada de biquad-uri). Adauga latenta ~ (numtaps-1)/(2*fs)
+    - la 513 taps si 48kHz, ~5.3ms, comparabil cu BLOCKSIZE-ul deja folosit."""
+    freqs_norm = np.concatenate(([0.0], freq_cal / (fs / 2.0), [1.0]))
+    freqs_norm = np.clip(freqs_norm, 0.0, 1.0)
+    # eliminam duplicate/neordonate care ar bloca firwin2
+    freqs_norm, idx_unic = np.unique(freqs_norm, return_index=True)
+
+    gain_liniar = 10 ** (-dev_cal_db / 20.0)
+    gain_extins = np.concatenate(([gain_liniar[0]], gain_liniar, [gain_liniar[-1]]))
+    gain_extins = gain_extins[idx_unic]
+
+    from scipy.signal import firwin2
+    taps = firwin2(numtaps, freqs_norm, gain_extins)
+    return taps
+
+sos_corectie_mic = None
+zi_corectie_mic = None
+
+if SURSA_OPT == "2":
+    try:
+        freq_cal, dev_cal_db = incarca_curba_calibrare(CALE_CALIBRARE_MICROFON)
+        sos_corectie_mic = construieste_filtru_corectie(SAMPLE_RATE, freq_cal, dev_cal_db)
+        if sos_corectie_mic is not None:
+            zi_corectie_mic = sosfilt_zi(sos_corectie_mic) * 0.0
+            print(f"Corectie microfon incarcata din {CALE_CALIBRARE_MICROFON} "
+                  f"({len(sos_corectie_mic)} benzi EQ active)")
+        else:
+            print("Curba de calibrare nu a generat nicio corectie (deviatii neglijabile).")
+    except (OSError, ValueError) as e:
+        print(f"Nu am putut incarca curba de calibrare a microfonului: {e}")
+        sos_corectie_mic = None
+
+def corecteaza_microfon(chunk):
+    """Aplica filtrul de compensare a microfonului. Ramane in threadul AUDIO
+    (record_callback) - cascada de ~15-20 biquad-uri, cost neglijabil
+    comparat cu filtrul de ponderare A/C existent (acelasi tip de operatie)."""
+    global zi_corectie_mic
+    if sos_corectie_mic is None:
+        return chunk
+    corectat, zi_corectie_mic = sosfilt(sos_corectie_mic, chunk, zi=zi_corectie_mic)
+    return corectat
+
+
+########################################################
 ### PONDERARE EXPONENTIALA IN TIMP (IEC 61672-1, 3.6) ###
 ########################################################
 
@@ -680,6 +780,7 @@ def record_callback(indata, frames, time_info, status):
     if status:
         print(status, file=sys.stderr)
     chunk = indata[:, 0].astype(np.float32, copy=True)
+    chunk = corecteaza_microfon(chunk)          # <-- NOU: compensare curba microfon
     chunk_ponderat = filtreaza_block(chunk)
     play_pointer += len(chunk)
     try:
