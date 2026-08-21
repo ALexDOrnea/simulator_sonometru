@@ -946,7 +946,9 @@ if PEAK_MODE:
 else:
     win = QtWidgets.QWidget()
     win.setWindowTitle(f"Analiza DSP live{titlu_context_str} - Mod: {MODE}")
-    win.resize(1280, 960)
+    # latime minima ca sa incapa etichetele si la multe benzi (1/12 oct)
+    latime_dorita = max(1280, 45 * NUM_BENZI)
+    win.resize(min(latime_dorita, 2400), 1000)
     win.setStyleSheet("background-color: black;")
 
     layout_main = QtWidgets.QHBoxLayout(win)
@@ -1054,6 +1056,20 @@ else:
             y0=NIVEL_PODEA
         )
         plot_bands.addItem(bar_item)
+
+        # ~~~~~ETICHETE NUMERICE PE FIECARE BANDA~~~~~
+        # Un pg.TextItem per banda, ancorat deasupra varfului barei curente.
+        # Font mic pentru ca la 1/12 octava pot fi 30-40+ benzi si nu vrem
+        # suprapuneri excesive intre etichete vecine.
+        font_eticheta = QtGui.QFont()
+        font_eticheta.setPointSize(8)
+        band_value_labels = []
+        for i in range(NUM_BENZI):
+            eticheta = pg.TextItem(text=f"{NIVEL_PODEA:.1f}", color="w", anchor=(0.5, 1.0))
+            eticheta.setFont(font_eticheta)
+            eticheta.setPos(i, NIVEL_PODEA)
+            plot_bands.addItem(eticheta)
+            band_value_labels.append(eticheta)
 
         ticks = []
         for i, banda in enumerate(octave_bands):
@@ -1191,6 +1207,13 @@ def update_gui():
 
         if plot_bands is not None and last_niveluri_benzi is not None:
             bar_item.setOpts(height=last_niveluri_benzi - NIVEL_PODEA)
+            # actualizam si etichetele numerice, plasate putin deasupra
+            # varfului fiecarei bare (offset fix, in dB, ca sa nu se suprapuna
+            # peste bara insasi)
+            offset_eticheta = 1.5
+            for i, val in enumerate(last_niveluri_benzi):
+                band_value_labels[i].setText(f"{val:.1f}")
+                band_value_labels[i].setPos(i, val + offset_eticheta)
 
     if stream is not None and not stream.active and raw_queue.empty() and data_queue.empty():
         running["active"] = False
