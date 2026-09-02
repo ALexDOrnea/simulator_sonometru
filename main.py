@@ -287,7 +287,7 @@ def construieste_filtru_corectie(fs,freq_cal,dev_cal_db,numtaps=513):
     # eliminam duplicate/neordonate care ar bloca firwin2
     freqs_norm,idx_unic=np.unique(freqs_norm,return_index=True)
 
-    gain_liniar=10**(-dev_cal_db/20.0)
+    gain_liniar=10**(dev_cal_db/20.0)
     gain_extins=np.concatenate(([gain_liniar[0]],gain_liniar,[gain_liniar[-1]]))
     gain_extins=gain_extins[idx_unic]
 
@@ -307,9 +307,16 @@ if APLICA_CORECTIE_MICROFON:
         freq_cal,dev_cal_db=incarca_curba_calibrare(CALE_CALIBRARE_MICROFON)
         sos_corectie_mic=construieste_filtru_corectie(SAMPLE_RATE,freq_cal,dev_cal_db)
         if sos_corectie_mic is not None:
-            zi_corectie_mic=sosfilt_zi(sos_corectie_mic)*0.0
+            # sos_corectie_mic e de fapt un vector de coeficienti FIR (rezultatul
+            # firwin2), NU un filtru in format SOS (Second-Order Sections) -
+            # sosfilt_zi() cere obligatoriu o matrice (n_sections, 6) si arunca
+            # ValueError pe un array 1D, eroare care era prinsa silentios de
+            # except-ul de mai jos, facand corectia sa nu se incarce NICIODATA.
+            # Starea initiala corecta pentru un FIR aplicat cu lfilter are
+            # lungimea numtaps-1 (nu se foloseste sosfilt_zi).
+            zi_corectie_mic=np.zeros(len(sos_corectie_mic)-1)
             print(f"mic corection loaded {CALE_CALIBRARE_MICROFON}"
-                  f"({len(sos_corectie_mic)} actice EQ bands)")
+                  f"({len(sos_corectie_mic)} FIR taps)")
         else:
             print("Curba de calibrare nu a generat nicio corectie (deviatii neglijabile).")
     except (OSError, ValueError) as e:
@@ -319,14 +326,14 @@ else:
     print("Sar peste incarcarea curbei de calibrare a microfonului (dezactivata mai sus).")
 
 def corecteaza_microfon(chunk):
-    """Aplica filtrul de compensare a microfonului. Ramane in threadul AUDIO
-    (record_callback) - cascada de ~15-20 biquad-uri, cost neglijabil
-    comparat cu filtrul de ponderare A/C existent (acelasi tip de operatie)."""
+    """Aplica filtrul FIR de compensare a microfonului. Ramane in threadul
+    AUDIO (record_callback). NOTA: sos_corectie_mic contine coeficienti FIR
+    (b), nu SOS - se aplica cu lfilter(b, [1.0], ...), nu cu sosfilt()."""
     global zi_corectie_mic
     if sos_corectie_mic is None:
         return chunk
-    corectat, zi_corectie_mic = sosfilt(sos_corectie_mic, chunk, zi=zi_corectie_mic)
-    return corectat
+    corectat, zi_corectie_mic = lfilter(sos_corectie_mic, [1.0], chunk, zi=zi_corectie_mic)
+    return corectat.astype(np.float32, copy=False)
 
 def creeaza_filtru_timp(tau,fs):
     alpha=1.0-np.exp(-1.0/(tau*fs))
