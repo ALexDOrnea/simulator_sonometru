@@ -6,7 +6,7 @@ import threading
 from collections import deque
 import numpy as np
 from scipy.io import wavfile
-from scipy.signal import sosfilt,sosfilt_zi,butter,bilinear_zpk,zpk2sos,lfilter
+from scipy.signal import sosfilt,sosfilt_zi,butter,bilinear_zpk,zpk2sos,lfilter,firwin2
 
 warnings.filterwarnings("ignore",category=UserWarning, module="scipy.io.wavfile")
 
@@ -262,77 +262,175 @@ def filtreaza_block(chunk):
 ########################################################
 ##### CORECTIE CURBA MICROFON (compensare raspuns) ######
 ########################################################
-# Filtru IIR (cascada biquad-uri EQ parametric, formule RBJ) care aplica
-# INVERSUL curbei de calibrare individuale a microfonului, astfel incat
-# raspunsul final sa fie cat mai aproape de plat. Se aplica DOAR pe semnalul
-# de la microfon (SURSA_OPT=="2"), niciodata pe redarea unui WAV - acolo nu
-# exista microfon in lant, deci nimic de corectat.
-# Fisier ales: 30degree (montaj cu incidenta oblica, nu axiala - vezi poza
-# cu suportul dublu microfon-test/B&K, unghi ~20-30 grade fata de difuzor).
+# Corectia este inversul deviatiei din fisierul de calibrare:
+# daca microfonul are +3 dB la o frecventa, filtrul aplica -3 dB.
+# Corectia se aplica DOAR pe semnalul provenit de la microfon.
+# Fluxul devine: MICROFON RAW -> MICROFON CORECTAT -> A/C/Z.
 
-CALE_CALIBRARE_MICROFON="microphone_profiles/35Y228_cal_0degree.txt"
-# CALE_CALIBRARE_MICROFON="35Y228_cal_0degree.txt"
+UNGHI_MICROFON = "0"
+PROFILE_MIC = {
+    "0": "microphone_profiles/35Y228_cal_0degree.txt",
+    "30": "microphone_profiles/35Y228_cal_Sonarworks_30degree.txt",
+    "90": "microphone_profiles/35Y228_cal_Sonarworks_90degree.txt",
+}
+
+CALE_CALIBRARE_MICROFON = PROFILE_MIC.get(
+    UNGHI_MICROFON, PROFILE_MIC["0"]
+)
+
+NUM_TAPS_CORECTIE = 2049
+FRECVENTA_MIN_CORECTIE = 20.0
+FRECVENTA_MAX_CORECTIE = 20000.0
+
 
 def incarca_curba_calibrare(path):
-    date=np.loadtxt(path)
-    return date[:,0],date[:,1]
+    date = np.loadtxt(path)
 
-def construieste_filtru_corectie(fs,freq_cal,dev_cal_db,numtaps=513):
-    """FIR proiectat prin frequency-sampling (firwin2), care reproduce DIRECT
-    inversul curbei de calibrare, fara acumulare de gain din filtre suprapuse
-    (spre deosebire de cascada de biquad-uri). Adauga latenta ~ (numtaps-1)/(2*fs)
-    - la 513 taps si 48kHz, ~5.3ms, comparabil cu BLOCKSIZE-ul deja folosit."""
-    freqs_norm=np.concatenate(([0.0],freq_cal/(fs/2.0),[1.0]))
-    freqs_norm=np.clip(freqs_norm,0.0,1.0)
-    # eliminam duplicate/neordonate care ar bloca firwin2
-    freqs_norm,idx_unic=np.unique(freqs_norm,return_index=True)
+    if date.ndim != 2 or date.shape[1] < 2:
+        raise ValueError(
+            "Fisierul de calibrare trebuie sa contina "
+            "cel putin doua coloane: frecventa si deviatie."
+        )
 
-    gain_liniar=10**(-dev_cal_db/20.0)
-    gain_extins=np.concatenate(([gain_liniar[0]],gain_liniar,[gain_liniar[-1]]))
-    gain_extins=gain_extins[idx_unic]
+    freq = np.asarray(date[:, 0], dtype=np.float64)
+    dev_db = np.asarray(date[:, 1], dtype=np.float64)
 
-    from scipy.signal import firwin2
-    taps=firwin2(numtaps,freqs_norm,gain_extins)
+    valid = np.isfinite(freq) & np.isfinite(dev_db) & (freq > 0)
+    freq = freq[valid]
+    dev_db = dev_db[valid]
+
+    order = np.argsort(freq)
+    freq = freq[order]
+    dev_db = dev_db[order]
+
+    freq, indices = np.unique(freq, return_index=True)
+    dev_db = dev_db[indices]
+
+    return freq, dev_db
+
+
+def construieste_filtru_corectie(
+        fs, freq_cal, dev_cal_db, numtaps=2049
+):
+    nyquist = fs / 2.0
+
+    mask = (
+        (freq_cal >= FRECVENTA_MIN_CORECTIE) &
+        (freq_cal <= FRECVENTA_MAX_CORECTIE) &
+        (freq_cal < nyquist)
+    )
+
+    freq = freq_cal[mask]
+    dev_db = dev_cal_db[mask]
+
+    if len(freq) < 2:
+        raise ValueError(
+            "Nu exista suficiente puncte valide pentru corectia microfonului."
+        )
+
+    # IMPORTANT: fisierul descrie eroarea microfonului, deci compensatia
+    # este INVERSUL acesteia. +3 dB deviat -> -3 dB compensat.
+    correction_db = -dev_db
+
+    # Interpolare densa in log-frecventa pentru o aproximare mai buna
+    # a curbei acustice.
+    freq_dense = np.geomspace(freq[0], freq[-1], 4000)
+    correction_dense_db = np.interp(
+        np.log10(freq_dense),
+        np.log10(freq),
+        correction_db
+    )
+
+    gain_dense = 10.0 ** (correction_dense_db / 20.0)
+
+    # firwin2 foloseste frecvente normalizate la Nyquist.
+    frequencies = np.concatenate([
+        [0.0],
+        freq_dense / nyquist,
+        [1.0]
+    ])
+
+    gains = np.concatenate([
+        [gain_dense[0]],
+        gain_dense,
+        [gain_dense[-1]]
+    ])
+
+    frequencies = np.clip(frequencies, 0.0, 1.0)
+    frequencies, indices = np.unique(
+        frequencies, return_index=True
+    )
+    gains = gains[indices]
+
+    taps = firwin2(
+        numtaps=numtaps,
+        freq=frequencies,
+        gain=gains,
+        window="hann"
+    )
+
     return taps
 
-sos_corectie_mic=None
-zi_corectie_mic=None
 
-# Incercam sa incarcam/construim filtrul DOAR daca utilizatorul a raspuns "da"
-# la intrebarea de la inceputul scriptului (APLICA_CORECTIE_MICROFON). Altfel
-# sarim direct peste - sos_corectie_mic ramane None, iar corecteaza_microfon()
-# devine un simplu bypass (comportament identic cu inainte de aceasta feature).
+b_corectie_mic = None
+zi_corectie_mic = None
+
 if APLICA_CORECTIE_MICROFON:
     try:
-        freq_cal,dev_cal_db=incarca_curba_calibrare(CALE_CALIBRARE_MICROFON)
-        sos_corectie_mic=construieste_filtru_corectie(SAMPLE_RATE,freq_cal,dev_cal_db)
-        if sos_corectie_mic is not None:
-            # sos_corectie_mic e de fapt un vector de coeficienti FIR (rezultatul
-            # firwin2), NU un filtru in format SOS (Second-Order Sections) -
-            # sosfilt_zi() cere obligatoriu o matrice (n_sections, 6) si arunca
-            # ValueError pe un array 1D, eroare care era prinsa silentios de
-            # except-ul de mai jos, facand corectia sa nu se incarce NICIODATA.
-            # Starea initiala corecta pentru un FIR aplicat cu lfilter are
-            # lungimea numtaps-1 (nu se foloseste sosfilt_zi).
-            zi_corectie_mic=np.zeros(len(sos_corectie_mic)-1)
-            print(f"mic corection loaded {CALE_CALIBRARE_MICROFON}"
-                  f"({len(sos_corectie_mic)} FIR taps)")
-        else:
-            print("Curba de calibrare nu a generat nicio corectie (deviatii neglijabile).")
+        freq_cal, dev_cal_db = incarca_curba_calibrare(
+            CALE_CALIBRARE_MICROFON
+        )
+
+        b_corectie_mic = construieste_filtru_corectie(
+            SAMPLE_RATE,
+            freq_cal,
+            dev_cal_db,
+            NUM_TAPS_CORECTIE
+        )
+
+        zi_corectie_mic = np.zeros(
+            len(b_corectie_mic) - 1,
+            dtype=np.float64
+        )
+
+        print()
+        print("==============================================")
+        print("       CORECTIE MICROFON ACTIVATA")
+        print("==============================================")
+        print(f"Profil: {CALE_CALIBRARE_MICROFON}")
+        print(f"Unghi: {UNGHI_MICROFON} grade")
+        print(f"FIR taps: {NUM_TAPS_CORECTIE}")
+        print(
+            f"Domeniu: {FRECVENTA_MIN_CORECTIE:.0f} - "
+            f"{FRECVENTA_MAX_CORECTIE:.0f} Hz"
+        )
+        print(
+            f"Latenta FIR: {(NUM_TAPS_CORECTIE - 1) / (2 * SAMPLE_RATE) * 1000:.2f} ms"
+        )
+        print("==============================================")
+        print()
+
     except (OSError, ValueError) as e:
-        print(f"calibration curve not loaded:{e}")
-        sos_corectie_mic=None
+        print(f"[EROARE] Curba de calibrare nu a fost incarcata: {e}")
+        b_corectie_mic = None
+        zi_corectie_mic = None
 else:
-    print("Sar peste incarcarea curbei de calibrare a microfonului (dezactivata mai sus).")
+    print("Corectia microfonului este dezactivata.")
+
 
 def corecteaza_microfon(chunk):
-    """Aplica filtrul FIR de compensare a microfonului. Ramane in threadul
-    AUDIO (record_callback). NOTA: sos_corectie_mic contine coeficienti FIR
-    (b), nu SOS - se aplica cu lfilter(b, [1.0], ...), nu cu sosfilt()."""
     global zi_corectie_mic
-    if sos_corectie_mic is None:
-        return chunk
-    corectat, zi_corectie_mic = lfilter(sos_corectie_mic, [1.0], chunk, zi=zi_corectie_mic)
+
+    if b_corectie_mic is None:
+        return chunk.copy()
+
+    corectat, zi_corectie_mic = lfilter(
+        b_corectie_mic,
+        [1.0],
+        chunk,
+        zi=zi_corectie_mic
+    )
+
     return corectat.astype(np.float32, copy=False)
 
 def creeaza_filtru_timp(tau,fs):
@@ -350,8 +448,9 @@ else:
     TAU_TIMP=0.125
 
 b_timp,a_timp=creeaza_filtru_timp(TAU_TIMP, SAMPLE_RATE)
-zi_nivel_raw=[0.0]        # NOTA: acum atins DOAR din threadul de PROCESARE
-zi_nivel_filt=[0.0]       # NOTA: acum atins DOAR din threadul de PROCESARE
+zi_nivel_raw=[0.0]        # RAW, doar threadul de procesare
+zi_nivel_corrected=[0.0]  # MICROFON CORECTAT, doar threadul de procesare
+zi_nivel_filt=[0.0]       # A/C/Z, doar threadul de procesare
 
 def nivel_ponderat_in_timp(chunk,b,a,zi):
     ms,zi_nou=lfilter(b,a,np.square(chunk),zi=zi)
@@ -482,6 +581,7 @@ else:
     WINDOW_SIZE_FFT = int(0.125 * SAMPLE_RATE)
 
 live_ring_buffer_raw_fft = np.zeros(WINDOW_SIZE_FFT)
+live_ring_buffer_corrected_fft = np.zeros(WINDOW_SIZE_FFT)
 live_ring_buffer_filtered_fft = np.zeros(WINDOW_SIZE_FFT)
 hanning_window = np.hanning(WINDOW_SIZE_FFT)
 fft_frequencies = np.fft.rfftfreq(WINDOW_SIZE_FFT, d=1.0 / SAMPLE_RATE)
@@ -490,6 +590,7 @@ FFT_DISPLAY_STEP = max(1, len(fft_frequencies) // 2000)
 fft_frequencies_disp = fft_frequencies[::FFT_DISPLAY_STEP]
 
 semnal_nefiltrat_complet = []
+semnal_corectat_complet = []
 semnal_filtrat_complet = []
 semnal_lock = threading.Lock()  # cele doua liste sunt scrise din processing_loop si citite la final din main
 
@@ -539,86 +640,139 @@ def reseteaza_peak_hold():
         peak_hold_state["filt_db"] = NIVEL_PODEA
 
 _batch_raw = []
+_batch_corrected = []
 _batch_filt = []
 _batch_count = 0
 
-def proceseaza_chunk(chunk, chunk_ponderat, pointer_esantion):
-    """Tot ce era inainte in trimite_date_live, acum rulat EXCLUSIV in
-    threadul de procesare (nu mai atinge deloc threadul audio).
+def proceseaza_chunk(
+        chunk_raw,
+        chunk_corrected,
+        chunk_ponderat,
+        pointer_esantion
+):
+    """Proceseaza un bloc audio in threadul DSP.
 
-    Nivelul ponderat in timp (bara/curba dB) si Leq raman calculate pe
-    FIECARE bloc - sunt ieftine (un singur filtru recursiv de ordin mic) si
-    trebuie sa fie fidele in timp. Benzile de octava si FFT-ul de afisare
-    (partea scumpa) se calculeaza doar o data la BATCH_FACTOR blocuri, pe
-    blocul concatenat - vezi nota de la BATCH_FACTOR mai sus."""
-    global zi_nivel_raw, zi_nivel_filt, _batch_count
+    Pastreaza separat cele trei etape:
+        1. RAW                 - exact ce vine din placa audio
+        2. CORRECTED           - dupa compensarea microfonului
+        3. WEIGHTED (A/C/Z)   - dupa ponderarea de frecventa
+    """
+    global zi_nivel_raw, zi_nivel_corrected, zi_nivel_filt, _batch_count
+
     current_time = pointer_esantion / SAMPLE_RATE
 
-    actualizeaza_leq(chunk, chunk_ponderat)
+    actualizeaza_leq(chunk_raw, chunk_ponderat)
     l_zeq, l_xeq = calculeaza_leq()
 
     if PEAK_MODE:
-        db_raw = calculeaza_peak_db(chunk)
+        db_raw = calculeaza_peak_db(chunk_raw)
         db_filtered = calculeaza_peak_db(chunk_ponderat)
-        data_queue.put((current_time, db_raw, db_filtered, None, None, None, l_zeq, l_xeq))
+        data_queue.put((
+            current_time, db_raw, db_filtered,
+            None, None, None, l_zeq, l_xeq
+        ))
         return
 
-    ms_raw, zi_nivel_raw = nivel_ponderat_in_timp(chunk, b_timp, a_timp, zi_nivel_raw)
-    ms_filt, zi_nivel_filt = nivel_ponderat_in_timp(chunk_ponderat, b_timp, a_timp, zi_nivel_filt)
+    ms_raw, zi_nivel_raw = nivel_ponderat_in_timp(
+        chunk_raw, b_timp, a_timp, zi_nivel_raw
+    )
+
+    ms_corrected, zi_nivel_corrected = nivel_ponderat_in_timp(
+        chunk_corrected, b_timp, a_timp, zi_nivel_corrected
+    )
+
+    ms_filt, zi_nivel_filt = nivel_ponderat_in_timp(
+        chunk_ponderat, b_timp, a_timp, zi_nivel_filt
+    )
+
+    # Afisajul principal ramane RAW vs ponderat, ca in versiunea ta.
+    # Semnalul corectat este pastrat separat pentru validare si FFT final.
     db_raw = db_din_ms(ms_raw[-1])
     db_filtered = db_din_ms(ms_filt[-1])
 
     fft_raw = fft_filtered = niveluri_benzi = None
 
     if plot_fft is not None or plot_bands is not None:
-        _batch_raw.append(chunk)
+        _batch_raw.append(chunk_raw)
+        _batch_corrected.append(chunk_corrected)
         _batch_filt.append(chunk_ponderat)
         _batch_count += 1
 
         if _batch_count >= BATCH_FACTOR:
             bloc_raw = np.concatenate(_batch_raw)
+            bloc_corrected = np.concatenate(_batch_corrected)
             bloc_filt = np.concatenate(_batch_filt)
+
             _batch_raw.clear()
+            _batch_corrected.clear()
             _batch_filt.clear()
             _batch_count = 0
 
             if plot_fft is not None:
-                actualizeaza_ring_buffer(live_ring_buffer_raw_fft, bloc_raw)
-                actualizeaza_ring_buffer(live_ring_buffer_filtered_fft, bloc_filt)
-                fft_raw = calculeaza_fft_pentru_afisare(live_ring_buffer_raw_fft)
-                fft_filtered = calculeaza_fft_pentru_afisare(live_ring_buffer_filtered_fft)
+                actualizeaza_ring_buffer(
+                    live_ring_buffer_raw_fft, bloc_raw
+                )
+                actualizeaza_ring_buffer(
+                    live_ring_buffer_corrected_fft, bloc_corrected
+                )
+                actualizeaza_ring_buffer(
+                    live_ring_buffer_filtered_fft, bloc_filt
+                )
+
+                fft_raw = calculeaza_fft_pentru_afisare(
+                    live_ring_buffer_raw_fft
+                )
+                fft_corrected = calculeaza_fft_pentru_afisare(
+                    live_ring_buffer_corrected_fft
+                )
+                fft_filtered = calculeaza_fft_pentru_afisare(
+                    live_ring_buffer_filtered_fft
+                )
 
             if plot_bands is not None:
                 niveluri_benzi = proceseaza_benzi(bloc_filt)
 
+    # Coada pastreaza si FFT-ul corectat. Pentru compatibilitate cu GUI-ul
+    # existent, campul fft_filtered ramane ponderat; FFT-ul corectat este
+    # transmis separat printr-un atribut global temporar.
     data_queue.put((
         current_time,
         db_raw,
         db_filtered,
-        fft_raw[::FFT_DISPLAY_STEP] if fft_raw is not None else None,
-        fft_filtered[::FFT_DISPLAY_STEP] if fft_filtered is not None else None,
+        (
+            fft_raw,
+            fft_corrected if 'fft_corrected' in locals() else None,
+            fft_filtered
+        ) if fft_raw is not None else None,
         niveluri_benzi,
         l_zeq,
         l_xeq,
+        db_din_ms(ms_corrected[-1])
     ))
 
+
 def processing_loop():
-    """Bucla threadului de PROCESARE: consuma din raw_queue (umpluta de threadul
-    audio) si produce in data_queue (consumata de threadul GUI). Ruleaza pana
-    cand stop_event e setat SI coada s-a golit."""
+    """Consuma blocurile audio din raw_queue si ruleaza DSP-ul in thread separat."""
     while True:
         try:
-            chunk, chunk_ponderat, pointer_esantion = raw_queue.get(timeout=0.2)
+            (chunk_raw, chunk_corrected, chunk_ponderat,
+             pointer_esantion) = raw_queue.get(timeout=0.2)
         except queue.Empty:
             if stop_event.is_set():
                 break
             continue
 
         with semnal_lock:
-            semnal_nefiltrat_complet.append(chunk)
+            semnal_nefiltrat_complet.append(chunk_raw)
+            semnal_corectat_complet.append(chunk_corrected)
             semnal_filtrat_complet.append(chunk_ponderat)
 
-        proceseaza_chunk(chunk, chunk_ponderat, pointer_esantion)
+        proceseaza_chunk(
+            chunk_raw,
+            chunk_corrected,
+            chunk_ponderat,
+            pointer_esantion
+        )
 
 ########################################################
 ############# THREAD AUDIO (callback-uri) ###############
@@ -651,12 +805,31 @@ def record_callback(indata, frames, time_info, status):
     global play_pointer
     if status:
         print(status, file=sys.stderr)
-    chunk = indata[:, 0].astype(np.float32, copy=True)
-    chunk = corecteaza_microfon(chunk)          # <-- NOU: compensare curba microfon
-    chunk_ponderat = filtreaza_block(chunk)
-    play_pointer += len(chunk)
+
+    # 1) Semnalul original de la ADC
+    chunk_raw = indata[:, 0].astype(
+        np.float32, copy=True
+    )
+
+    # 2) Compensarea raspunsului microfonului
+    chunk_corrected = corecteaza_microfon(
+        chunk_raw
+    )
+
+    # 3) Ponderarea A/C/Z se aplica DUPA corectia microfonului
+    chunk_ponderat = filtreaza_block(
+        chunk_corrected
+    )
+
+    play_pointer += len(chunk_raw)
+
     try:
-        raw_queue.put_nowait((chunk, chunk_ponderat.copy(), play_pointer))
+        raw_queue.put_nowait((
+            chunk_raw,
+            chunk_corrected.copy(),
+            chunk_ponderat.copy(),
+            play_pointer
+        ))
     except queue.Full:
         pass
 
@@ -674,7 +847,7 @@ plot_db = None
 plot_fft = None
 plot_bands = None
 curve_db_raw = curve_db_filtered = None
-curve_fft_raw = curve_fft_filtered = None
+curve_fft_raw = curve_fft_corrected = curve_fft_filtered = None
 bar_item = None
 
 COL_ORANGE = (255, 165, 0)
@@ -973,7 +1146,7 @@ else:
     afiseaza_benzi = GRAFIC_OPT in ("3", "4")
 
     if afiseaza_db:
-        plot_db = win_graphics.addPlot(title=f"Nivel live: Z (nefiltrat) vs {TIP_PONDERARE}")
+        plot_db = win_graphics.addPlot(title=f"Nivel live: Z RAW vs {TIP_PONDERARE} (microfon corectat inainte de weighting)")
         plot_db.setLabel("bottom", "Timp (s)")
         plot_db.setLabel("left", "Nivel (dB SPL)")
         plot_db.setYRange(NIVEL_PODEA, NIVEL_PLAFON)
@@ -983,7 +1156,7 @@ else:
         curve_db_filtered = CurbaIncrementala(COL_PURPLE, latime=2)
         plot_db.addItem(curve_db_raw)
         plot_db.addItem(curve_db_filtered)
-        plot_db.legend.addItem(curve_db_raw, f"Z (nefiltrat) - nivel ({MODE}, IEC 61672-1 Ec.1)")
+        plot_db.legend.addItem(curve_db_raw, f"Z RAW - nivel ({MODE})")
         plot_db.legend.addItem(curve_db_filtered, f"{TIP_PONDERARE} - nivel ({MODE}, IEC 61672-1 Ec.1)")
 
         plot_db.setXRange(0, 10)
@@ -992,7 +1165,7 @@ else:
             win_graphics.nextRow()
 
     if afiseaza_fft:
-        plot_fft = win_graphics.addPlot(title=f"FFT in timp real: Z (nefiltrat) vs {TIP_PONDERARE}")
+        plot_fft = win_graphics.addPlot(title=f"FFT in timp real: Z RAW vs Z CORECTAT vs {TIP_PONDERARE}")
         plot_fft.setLabel("bottom", "Frecventa (Hz)")
         plot_fft.setLabel("left", "Amplitudine (dB SPL)")
         plot_fft.setLogMode(x=True, y=False)
@@ -1004,8 +1177,18 @@ else:
         min_plot_frequency = min(20, max_plot_frequency / 10)
         plot_fft.setXRange(np.log10(min_plot_frequency), np.log10(max_plot_frequency))
 
-        curve_fft_raw = plot_fft.plot(pen=pg.mkPen(COL_ORANGE, width=1.5), name="FFT Z (nefiltrat)")
-        curve_fft_filtered = plot_fft.plot(pen=pg.mkPen(COL_CYAN, width=1.5), name=f"FFT {TIP_PONDERARE}")
+        curve_fft_raw = plot_fft.plot(
+            pen=pg.mkPen(COL_ORANGE, width=1.5),
+            name="FFT Z RAW"
+        )
+        curve_fft_corrected = plot_fft.plot(
+            pen=pg.mkPen(COL_GREEN, width=1.5),
+            name="FFT Z CORECTAT"
+        )
+        curve_fft_filtered = plot_fft.plot(
+            pen=pg.mkPen(COL_CYAN, width=1.5),
+            name=f"FFT {TIP_PONDERARE}"
+        )
 
         if afiseaza_benzi:
             win_graphics.nextRow()
@@ -1103,17 +1286,20 @@ def update_gui():
     last_db_raw = None
     last_db_filtered = None
     last_fft_raw = None
+    last_fft_corrected = None
     last_fft_filtered = None
+    last_db_corrected = None
     last_niveluri_benzi = None
     last_leq_raw = None
     last_leq_filt = None
 
     while True:
         try:
-            (t, db_raw, db_filtered, fft_raw, fft_filtered, niveluri_benzi, leq_raw, leq_filt) = data_queue.get_nowait()
+            (t, db_raw, db_filtered, fft_data, niveluri_benzi, leq_raw, leq_filt, db_corrected) = data_queue.get_nowait()
             last_time = t
             last_db_raw = db_raw
             last_db_filtered = db_filtered
+            last_db_corrected = db_corrected
             if not PEAK_MODE:
                 x_data.append(t)
                 y_db_raw.append(db_raw)
@@ -1133,9 +1319,8 @@ def update_gui():
             # fft/niveluri_benzi vin doar o data la BATCH_FACTOR elemente din coada
             # (vezi proceseaza_chunk) - nu le suprascriem cu None cand un element
             # ulterior din aceeasi golire a cozii nu are date noi de benzi/FFT.
-            if fft_raw is not None:
-                last_fft_raw = fft_raw
-                last_fft_filtered = fft_filtered
+            if fft_data is not None:
+                last_fft_raw, last_fft_corrected, last_fft_filtered = fft_data
             if niveluri_benzi is not None:
                 last_niveluri_benzi = niveluri_benzi
             last_leq_raw = leq_raw
@@ -1171,8 +1356,17 @@ def update_gui():
             # mai sus (adauga_punct), nu mai e nevoie de un setData() cu tot arrayul aici.
 
         if plot_fft is not None and last_fft_raw is not None:
-            curve_fft_raw.setData(fft_frequencies_disp, last_fft_raw)
-            curve_fft_filtered.setData(fft_frequencies_disp, last_fft_filtered)
+            if last_fft_corrected is not None:
+                curve_fft_corrected.setData(
+                    fft_frequencies_disp,
+                    last_fft_corrected
+                )
+            curve_fft_raw.setData(
+                fft_frequencies_disp, last_fft_raw
+            )
+            curve_fft_filtered.setData(
+                fft_frequencies_disp, last_fft_filtered
+            )
 
         if plot_bands is not None and last_niveluri_benzi is not None:
             bar_item.setOpts(height=last_niveluri_benzi - NIVEL_PODEA)
@@ -1231,6 +1425,7 @@ finally:
         avem_semnal = bool(semnal_nefiltrat_complet) and not PEAK_MODE
         if avem_semnal:
             semnal_complet_raw = np.concatenate(semnal_nefiltrat_complet)
+            semnal_complet_corrected = np.concatenate(semnal_corectat_complet)
             semnal_complet_filt = np.concatenate(semnal_filtrat_complet)
 
     if avem_semnal:
@@ -1238,11 +1433,22 @@ finally:
         freqs_finale = np.fft.rfftfreq(N, d=1.0 / SAMPLE_RATE)
 
         final_window = np.hanning(N)
-        fft_orig = np.abs(np.fft.rfft(semnal_complet_raw * final_window)) / (N / 2.0)
-        fft_filt = np.abs(np.fft.rfft(semnal_complet_filt * final_window)) / (N / 2.0)
+        fft_orig = np.abs(
+            np.fft.rfft(semnal_complet_raw * final_window)
+        ) / (N / 2.0)
+        fft_corrected = np.abs(
+            np.fft.rfft(semnal_complet_corrected * final_window)
+        ) / (N / 2.0)
+        fft_filt = np.abs(
+            np.fft.rfft(semnal_complet_filt * final_window)
+        ) / (N / 2.0)
 
         db_orig = np.clip(
             20 * np.log10(fft_orig + EPSILON) + CALIBRARE_DB,
+            NIVEL_PODEA, NIVEL_PLAFON
+        )
+        db_corrected = np.clip(
+            20 * np.log10(fft_corrected + EPSILON) + CALIBRARE_DB,
             NIVEL_PODEA, NIVEL_PLAFON
         )
         db_filt = np.clip(
@@ -1253,9 +1459,10 @@ finally:
         FINAL_DISPLAY_STEP = max(1, len(freqs_finale) // 4000)
         freqs_disp = freqs_finale[::FINAL_DISPLAY_STEP]
         db_orig_disp = db_orig[::FINAL_DISPLAY_STEP]
+        db_corrected_disp = db_corrected[::FINAL_DISPLAY_STEP]
         db_filt_disp = db_filt[::FINAL_DISPLAY_STEP]
 
-        titlu_final = f"comparatie spectrala: Z (nefiltrat) vs {TIP_PONDERARE} (cal {CALIBRARE_DB:+.1f} dB)"
+        titlu_final = f"comparatie spectrala: Z RAW vs Z CORECTAT vs {TIP_PONDERARE} (cal {CALIBRARE_DB:+.1f} dB)"
 
         app2 = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
 
@@ -1279,6 +1486,11 @@ finally:
             freqs_disp, db_orig_disp,
             pen=pg.mkPen(COL_ORANGE, width=1.5),
             name="Spectru Z (nefiltrat)",
+        )
+        plot_comp.plot(
+            freqs_disp, db_corrected_disp,
+            pen=pg.mkPen(COL_GREEN, width=1.5),
+            name="Spectru Z CORECTAT",
         )
         plot_comp.plot(
             freqs_disp, db_filt_disp,
