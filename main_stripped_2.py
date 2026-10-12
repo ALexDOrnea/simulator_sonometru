@@ -76,8 +76,8 @@ except ValueError:
     print("Valoare invalida. Se foloseste 0.0 dB")
     CALIBRARE_DB = 0.0
 
-SAMPLE_RATE = 48000
-BLOCKSIZE = 256
+SAMPLE_RATE = 96000
+BLOCKSIZE = 512
 LATENCY = "low"
 EPSILON = 1e-12
 GUI_REFRESH_MS = 50
@@ -153,7 +153,7 @@ zi_ponderare = sosfilt_zi(sos_ponderare) * 0.0 if sos_ponderare is not None else
 ############## CORECTIE CURBA MICROFON (FIR) ###########
 ########################################################
 
-CALE_CALIBRARE_MICROFON = "microphone_profiles/35Y228_cal_0degree.txt"
+CALE_CALIBRARE_MICROFON = "microphone_profiles/behringer_ech8000_2.txt"
 
 def construieste_filtru_corectie(fs, freq_cal, dev_cal_db, numtaps=513):
     freqs = np.clip(np.concatenate(([0.0], freq_cal / (fs / 2.0), [1.0])), 0.0, 1.0)
