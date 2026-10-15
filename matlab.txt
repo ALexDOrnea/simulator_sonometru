@@ -1,0 +1,170 @@
+%% ANALIZA_SONOMETRU
+%  Compara scriptul Python cu sonometrul de referinta:
+%    - Tabel 1: fara calibrare (48 kHz)
+%    - Tabel 3: calibrare + 96 kHz
+%  Genereaza 4 grafice (L si A, pentru fiecare tabel) si statistici de eroare.
+%  Eroare = script - sonometru [dB].
+%  Necesita MATLAB R2016b sau mai nou (functii locale in script).
+
+clear; clc; close all;
+
+SALVEAZA_FIGURI = true;    % salveaza graficele ca PNG
+SALVEAZA_CSV    = true;    % salveaza statisticile in CSV
+
+%% ------------------------------------------------------------------
+%  DATE
+%% ------------------------------------------------------------------
+f = [100 250 500 800 1000 2500 4500 6000 8000 10000 ...
+     11000 12000 13000 14000 15000 16000 17000 18000 19000 20000];
+
+% --- Tabel 1: fara calibrare ---
+T1.scriptL = [98.9 96.5 95.3 94.4 94.5 96.1 98.7 94.9 95.3 101.2 106.5 96.5 90.2 88.8 85.2 83.2 81.6 83.2 86.1 84.9];
+T1.scriptA = [78.6 87.8 92.0 93.6 94.5 97.6 99.7 95.5 94.8  99.4 103.8 92.8 85.3 82.2 77.2 73.6 69.7 68.9 68.8 63.7];
+T1.sonoL   = [98.5 96.6 95.3 94.5 94.4 96.0 98.3 95.3 95.7 101.8 103.0 95.7 90.4 88.7 91.2 91.5 91.3 92.8 95.7 96.3];
+T1.sonoA   = [79.8 87.9 92.1 93.7 94.6 97.3 99.1 95.2 94.6  99.5 102.1 91.9 85.8 83.5 85.2 84.8 84.0 84.8 87.0 87.0];
+T1.nume    = 'Fara calibrare (48 kHz)';
+
+% --- Tabel 3: calibrare + 96 kHz ---
+T3.scriptL = [100.3 98.0 96.6 95.4 95.3 98.6  99.9 97.0 96.9 102.3 103.6 96.1 91.9 92.7 95.1 94.4 93.1 93.0 94.3 95.7];
+T3.scriptA = [ 81.1 89.3 93.3 94.6 95.3 99.9 100.8 97.2 95.9 100.0 100.4 92.2 87.2 87.2 88.7 87.2 85.1 84.1 84.4 85.0];
+T3.sonoL   = [100.2 97.8 96.3 95.2 95.4 98.1  99.7 96.3 96.6 101.6 103.2 96.7 91.9 92.4 94.9 94.1 93.3 92.7 94.2 95.5];
+T3.sonoA   = [ 81.2 89.2 93.1 94.5 95.4 99.3 100.5 96.4 95.6  99.2 102.5 92.8 87.4 87.3 89.0 87.5 86.0 94.7 85.5 86.5];
+%                                                                                                      ^^^^
+% ATENTIE: la 18 kHz in poza apare 94.7 pentru sonometru A, dar sonometru L
+% este 92.7, deci valoarea corecta e probabil 84.7. Verifica in tabelul tau
+% si corecteaza aici, altfel statisticile pentru A (96 kHz) sunt distorsionate.
+T3.nume    = 'Calibrare + 96 kHz';
+
+% Test cu zgomot alb (doar tabel 3): [script sonometru]
+WN.L = [93.7 93.6];
+WN.A = [92.0 92.1];
+
+%% ------------------------------------------------------------------
+%  GRAFICE (4 figuri: L si A pentru fiecare tabel)
+%% ------------------------------------------------------------------
+tabele = {T1, T3};
+for k = 1:numel(tabele)
+    T = tabele{k};
+    plot_comparatie(f, T.scriptL, T.sonoL, ...
+        sprintf('Nivel L (Z) - %s', T.nume), 'Nivel L [dB]', SALVEAZA_FIGURI, ...
+        sprintf('grafic_L_tabel%d.png', k));
+    plot_comparatie(f, T.scriptA, T.sonoA, ...
+        sprintf('Nivel A - %s', T.nume), 'Nivel A [dB(A)]', SALVEAZA_FIGURI, ...
+        sprintf('grafic_A_tabel%d.png', k));
+end
+
+%% ------------------------------------------------------------------
+%  STATISTICI
+%% ------------------------------------------------------------------
+zone = {'Toata banda (100-20k)', true(size(f));
+        'Joase+medii (<=10k)',   f <= 10000;
+        'Inalte (>10k)',         f >  10000};
+
+rows = struct([]);
+r = 0;
+for k = 1:numel(tabele)
+    T = tabele{k};
+    serii = {'L', T.scriptL - T.sonoL;
+             'A', T.scriptA - T.sonoA};
+    for s = 1:size(serii, 1)
+        e_all = serii{s, 2};
+        for z = 1:size(zone, 1)
+            m  = zone{z, 2};
+            st = calc_stat(e_all(m), f(m));
+            r = r + 1;
+            rows(r).Set        = T.nume;
+            rows(r).Curba      = serii{s, 1};
+            rows(r).Zona       = zone{z, 1};
+            rows(r).N          = st.N;
+            rows(r).Medie_dB   = st.medie;
+            rows(r).Mediana_dB = st.mediana;
+            rows(r).MAE_dB     = st.mae;
+            rows(r).STD_dB     = st.std;
+            rows(r).RMSE_dB    = st.rmse;
+            rows(r).Max_dB     = st.max;
+            rows(r).Min_dB     = st.min;
+            rows(r).MaxAbs_dB  = st.maxabs;
+            rows(r).F_MaxAbs   = st.f_maxabs;
+            rows(r).Sub1dB_pct = st.sub1;
+            rows(r).Sub2dB_pct = st.sub2;
+            rows(r).Sub3dB_pct = st.sub3;
+        end
+    end
+end
+Tstat = struct2table(rows);
+
+disp('=========== STATISTICI EROARE (script - sonometru) ===========');
+disp(Tstat);
+
+% --- Rezumat inainte / dupa ---
+disp(' ');
+disp('=========== REZUMAT: MAE [dB] inainte -> dupa ===========');
+for c = {'L', 'A'}
+    cc = c{1};
+    for z = 1:size(zone, 1)
+        i1 = strcmp(Tstat.Set, T1.nume) & strcmp(Tstat.Curba, cc) & strcmp(Tstat.Zona, zone{z, 1});
+        i3 = strcmp(Tstat.Set, T3.nume) & strcmp(Tstat.Curba, cc) & strcmp(Tstat.Zona, zone{z, 1});
+        fprintf('Curba %s | %-24s : %5.2f -> %5.2f dB\n', cc, zone{z, 1}, ...
+            Tstat.MAE_dB(i1), Tstat.MAE_dB(i3));
+    end
+end
+
+% --- Zgomot alb ---
+fprintf('\nZgomot alb (tabel 3): L: script %.1f / sono %.1f -> eroare %+.1f dB | A: script %.1f / sono %.1f -> eroare %+.1f dB\n', ...
+    WN.L(1), WN.L(2), WN.L(1) - WN.L(2), WN.A(1), WN.A(2), WN.A(1) - WN.A(2));
+
+if SALVEAZA_CSV
+    writetable(Tstat, 'statistici_sonometru.csv');
+    disp('Salvat: statistici_sonometru.csv');
+end
+
+%% ------------------------------------------------------------------
+%  FUNCTII LOCALE
+%% ------------------------------------------------------------------
+function plot_comparatie(f, script, sono, titlu, ylab, salveaza, fisier)
+    fig = figure('Color', 'w', 'Position', [100 100 950 520]);
+    semilogx(f, script, '-o', 'LineWidth', 1.6, 'MarkerSize', 6, ...
+        'MarkerFaceColor', 'auto'); hold on;
+    semilogx(f, sono, '-s', 'LineWidth', 1.6, 'MarkerSize', 6, ...
+        'MarkerFaceColor', 'auto');
+    grid on;
+    ax = gca;
+    ax.XMinorGrid = 'off';
+    ax.XMinorTick = 'off';
+    xlim([85 24000]);
+    xticks(f);
+    xticklabels(arrayfun(@eticheta_f, f, 'UniformOutput', false));
+    xtickangle(45);
+    xlabel('Frecventa [Hz]');
+    ylabel(ylab);
+    title(titlu);
+    legend({'Script', 'Sonometru'}, 'Location', 'best');
+    if salveaza
+        saveas(fig, fisier);
+    end
+end
+
+function s = eticheta_f(x)
+    if x >= 1000
+        s = sprintf('%gk', x / 1000);
+    else
+        s = sprintf('%g', x);
+    end
+end
+
+function st = calc_stat(e, f)
+    [~, i]    = max(abs(e));
+    st.N      = numel(e);
+    st.medie  = mean(e);          % bias (eroare medie cu semn)
+    st.mediana = median(e);
+    st.mae    = mean(abs(e));     % eroare medie absoluta
+    st.std    = std(e);           % abatere standard (N-1)
+    st.rmse   = sqrt(mean(e.^2));
+    st.max    = max(e);           % cea mai mare supraestimare
+    st.min    = min(e);           % cea mai mare subestimare
+    st.maxabs = abs(e(i));        % eroare maxima absoluta
+    st.f_maxabs = f(i);           % frecventa la care apare
+    st.sub1   = 100 * mean(abs(e) <= 1);
+    st.sub2   = 100 * mean(abs(e) <= 2);
+    st.sub3   = 100 * mean(abs(e) <= 3);
+end
