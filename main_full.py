@@ -152,7 +152,7 @@ print(f"Blocksize folosit: {BLOCKSIZE if BLOCKSIZE else 'auto'} | Latency folosi
 
 ###########################################
 #########Setari initiale DSP###############
-SAMPLE_RATE=48000
+SAMPLE_RATE=96000
 EPSILON=1e-12
 AUDIO_NORM=None
 
@@ -269,7 +269,8 @@ def filtreaza_block(chunk):
 
 UNGHI_MICROFON = "0"
 PROFILE_MIC = {
-    "0": "microphone_profiles/35Y228_cal_0degree.txt",
+    # "0": "microphone_profiles/35Y228_cal_0degree.txt",
+    "0": "calibration2.txt",
     "30": "microphone_profiles/35Y228_cal_Sonarworks_30degree.txt",
     "90": "microphone_profiles/35Y228_cal_Sonarworks_90degree.txt",
 }
