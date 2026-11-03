@@ -25,4 +25,4 @@ Tasks
 * verificare caracteristica diferite microfoane
 * optimizare gui -- facut partial
 
-test
+test hahahihi
